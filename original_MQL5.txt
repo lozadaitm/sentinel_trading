@@ -1,0 +1,855 @@
+//+------------------------------------------------------------------+
+//|            M15_Gold_Sentinel_HyperGrinder_v20_0.mq5              |
+//|            "The Independent Warrior Edition"                     |
+//|                                                                  |
+//| Arquitecto: Gemini (Quant Algo-Architect)                        |
+//| MEJORAS v20.0:                                                   |
+//|  1. GRINDER TRAILING: Doble velocidad (Slow/Turbo) exclusiva     |
+//|     para las operaciones del Grinder.                            |
+//|  2. INDEPENDENCIA TOTAL: Confirmación de lógica agnóstica para   |
+//|     Op3 y Grinder (pueden ir contra Op1).                        |
+//|  3. SAFETY: El Grinder asegura ganancias mínimas (Scalping puro).|
+//+------------------------------------------------------------------+
+#property copyright "Brenskov & AI Architect"
+#property version   "20.0"
+#property strict
+
+#include <Trade\Trade.mqh>
+CTrade trade;
+
+// ==================================================================
+// INPUTS
+// ==================================================================
+
+input group "--- 0. FILTROS DE MERCADO ---"
+input int    InpMaxSpread        = 350;        
+
+input group "--- 1. GESTIÓN DE RIESGO BASE ---"
+input double InpBaseRisk         = 5000.0;     
+input double InpBaseLots         = 0.12;       
+input double InpMaxEntryLots     = 1.00;       
+input double InpMaxRecoveryLots  = 2.00;       
+
+input group "--- 2. SALIDA MAESTRA ---"
+input bool   InpUseBasketClose     = true;
+input double InpBasketPercent      = 0.15;       
+input double InpCommissionPerLot   = 6.0;        
+input bool   InpUseDynamicRetrace  = true;       
+input double InpRetraceATRMult     = 0.1;        
+input double InpFixedRetrace       = 2.0;        
+
+input group "--- 3. COBERTURA (SENTINEL) ---"
+input bool   InpUseDynamicHedge    = true;       
+input int    InpHedgeDist          = 350;        
+input double InpHedgeATRMult       = 2.0;        
+
+input group "--- 4. HEALER INTELIGENTE ---"
+input bool   InpUseHealer          = true;       
+input bool   InpHealerBalanceBias  = true;       
+input bool   InpUseUnwindMode      = true;       
+input double InpUnwindATR_Mult     = 2.0;        
+input double InpUnwindMoney_Floor  = 30.0;       
+
+input group "--- 5. BIO-REACTOR (SMART GRINDER) ---"
+input bool   InpUseGrinder         = true;       
+input double InpGrinderLots        = 0.05;       // Lote Identificador
+input int    InpGrinderTimeStop    = 45;         
+input int    InpGrinderADX_Trend   = 30;         
+input int    InpGrinderRSI_OB      = 70;         
+input int    InpGrinderRSI_OS      = 30;
+// --- NUEVO: TRAILING EXCLUSIVO GRINDER ---
+input bool   InpGrinderUseTrail    = true;       // Activar Trailing para Grinder
+input int    InpGrinderTrailStart  = 50;         // Inicia a 5 pips (Rápido)
+input int    InpGrinderTrailDist   = 20;         // Distancia corta 2 pips
+input int    InpGrinderTurboTrig   = 150;        // Si gana 15 pips...
+input int    InpGrinderTurboDist   = 50;         // ...Afloja a 5 pips de distancia
+
+input group "--- 6. FILTROS DE ENTRADA (CORE) ---"
+input bool   InpUsePullback        = true;
+input double InpATREntryDistance   = 2.5;        
+input bool   InpUseH4_Struct       = true;        
+input int    InpEntryRSI_Max       = 75;         
+input int    InpEntryRSI_Min       = 25;         
+
+input group "--- 7. TRAILING FLUIDO (SENTINEL) ---"
+input bool   InpUseSmartTrail       = true;       
+input double InpTrailActivate       = 1.0;        
+input double InpTrailDistATR        = 1.5;        
+input bool   InpUseOp3Trail         = true;       
+input double InpOp3_StartATR        = 0.60;       
+input double InpOp3_BaseDistATR     = 0.40;       
+input double InpOp3_TurboTriggerATR = 3.0;        
+input double InpOp3_TurboDistATR    = 1.2;        
+
+input group "--- 8. CEREBRO RECUPERACIÓN ---"
+input bool   InpUseM5Confirm       = true;       
+input int    InpMinTechWait        = 60;         
+
+input group "--- 9. MODO RESCATE SENTINEL ---"
+input bool   InpUseRescueMode      = true;       
+input double InpRescueATR_Mult     = 4.0;        
+input int    InpRescueRSI          = 70;         
+input double InpRescueTarget_Pct   = 0.10;       
+input double InpDD_Percent_L2      = 3.0;        
+input double InpDD_Percent_L3      = 8.0;        
+
+input group "--- 10. OTROS ---"
+input int    InpFastMA             = 9;          
+input int    InpATRPeriod          = 14;
+input bool   InpCloseFriday        = true;       
+input int    InpFridayHour         = 20;
+input int    InpMondayStartHour    = 10;
+input bool   InpEnableFileLog      = true;
+input string InpLogFileName        = "Gold_HyperGrinder_v20";
+
+// Variables Globales
+int handleATR, handleFractals, handleFractalsH4, handleMA, handleRSI;
+int handleGrinderMA, handleGrinderADX, handleGrinderRSI;
+double bufferATR[], bufferMA[], bufferRSI[];
+double bufferG_MA[], bufferG_ADX[], bufferG_RSI[]; 
+
+int magicNum = 100100; 
+datetime lastRecoveryCloseTime = 0;
+ulong lastHealedTicket = 0; 
+double maxCyclePeak = 0.0; 
+int fileHandle = INVALID_HANDLE; 
+int InpCooldownSeconds = 10; 
+
+//+------------------------------------------------------------------+
+//| UTILS                                                            |
+//+------------------------------------------------------------------+
+void WriteLog(string type, string message, double price=0, double lots=0) {
+   string time = TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS);
+   string balance = DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2);
+   string logText = StringFormat("[%s] %s | Price: %.2f | Vol: %.2f | Bal: %s", type, message, price, lots, balance);
+   Print(logText); 
+   if(InpEnableFileLog && fileHandle != INVALID_HANDLE) {
+      FileWrite(fileHandle, time, type, message, DoubleToString(price, 2), DoubleToString(lots, 2), balance);
+      FileFlush(fileHandle); 
+   }
+}
+
+double GetDynamicMoneyValue(double percent) {
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   return (balance * percent) / 100.0;
+}
+
+double GetEffectiveATR() {
+   double rawATR = bufferATR[0];
+   double minATR = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 150; 
+   return MathMax(rawATR, minATR);
+}
+
+bool CheckFreeMargin(double lots, long type) {
+   double marginRequired = 0.0;
+   if(!OrderCalcMargin((ENUM_ORDER_TYPE)type, _Symbol, lots, SymbolInfoDouble(_Symbol, SYMBOL_ASK), marginRequired)) return false;
+   if(AccountInfoDouble(ACCOUNT_MARGIN_FREE) < marginRequired * 1.1) return false;
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| INITIALIZATION                                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   trade.SetExpertMagicNumber(magicNum);
+   trade.SetDeviationInPoints(50); 
+   trade.SetTypeFilling(ORDER_FILLING_IOC); 
+   
+   // --- CORE INDICATORS ---
+   handleATR      = iATR(_Symbol, _Period, InpATRPeriod);
+   handleFractals = iFractals(_Symbol, _Period);
+   handleFractalsH4 = iFractals(_Symbol, PERIOD_H4);
+   handleMA       = iMA(_Symbol, _Period, InpFastMA, 0, MODE_EMA, PRICE_CLOSE);
+   handleRSI      = iRSI(_Symbol, _Period, 14, PRICE_CLOSE); 
+   
+   // --- GRINDER INDICATORS (M5) ---
+   handleGrinderMA  = iMA(_Symbol, PERIOD_M5, 50, 0, MODE_EMA, PRICE_CLOSE); 
+   handleGrinderADX = iADX(_Symbol, PERIOD_M5, 14);
+   handleGrinderRSI = iRSI(_Symbol, PERIOD_M5, 14, PRICE_CLOSE);
+
+   if(handleATR == INVALID_HANDLE || handleFractals == INVALID_HANDLE || 
+      handleFractalsH4 == INVALID_HANDLE || handleMA == INVALID_HANDLE || 
+      handleRSI == INVALID_HANDLE || handleGrinderMA == INVALID_HANDLE ||
+      handleGrinderADX == INVALID_HANDLE || handleGrinderRSI == INVALID_HANDLE) 
+      return(INIT_FAILED);
+      
+   ArraySetAsSeries(bufferATR, true);
+   ArraySetAsSeries(bufferMA, true);
+   ArraySetAsSeries(bufferRSI, true);
+   ArraySetAsSeries(bufferG_MA, true);
+   ArraySetAsSeries(bufferG_ADX, true);
+   ArraySetAsSeries(bufferG_RSI, true);
+   
+   if(InpEnableFileLog) {
+      string fileName = InpLogFileName + "_" + _Symbol + ".csv";
+      fileHandle = FileOpen(fileName, FILE_WRITE|FILE_READ|FILE_CSV|FILE_ANSI, ",");
+      if(fileHandle != INVALID_HANDLE) FileSeek(fileHandle, 0, SEEK_END);
+   }
+   
+   datetime startLookback = TimeCurrent() - (86400 * 2); 
+   if(HistorySelect(startLookback, TimeCurrent())) {
+       int total = HistoryDealsTotal();
+       if(total > 0) lastHealedTicket = HistoryDealGetTicket(total-1);
+   }
+   
+   WriteLog("SYSTEM", "HYPER GRINDER v20.0 INICIADO.", 0, 0);
+   return(INIT_SUCCEEDED);
+}
+
+void OnDeinit(const int reason)
+{
+   if(InpEnableFileLog && fileHandle != INVALID_HANDLE) FileClose(fileHandle);
+   IndicatorRelease(handleATR);
+   IndicatorRelease(handleFractals);
+   IndicatorRelease(handleFractalsH4);
+   IndicatorRelease(handleMA);
+   IndicatorRelease(handleRSI);
+   IndicatorRelease(handleGrinderMA);
+   IndicatorRelease(handleGrinderADX);
+   IndicatorRelease(handleGrinderRSI);
+}
+
+bool CheckSpread() {
+   long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   if(spread > InpMaxSpread) return false; 
+   return true;
+}
+
+double CalculateLots(bool isRecoveryPhase) {
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double ratio = equity / InpBaseRisk;
+   double lots = ratio * InpBaseLots;
+   
+   double volStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   lots = MathFloor(lots / volStep) * volStep;
+   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   
+   if(lots < minLot) lots = minLot;
+   if(lots > maxLot) lots = maxLot;
+   
+   double currentCap = isRecoveryPhase ? InpMaxRecoveryLots : InpMaxEntryLots;
+   if(lots > currentCap) lots = currentCap;
+   
+   return lots;
+}
+
+void CloseAllPositions(string reason) {
+   int total = PositionsTotal();
+   double totalProfit = 0;
+   for(int i = total - 1; i >= 0; i--) {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == magicNum) {
+         totalProfit += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+         trade.PositionClose(ticket);
+      }
+   }
+   WriteLog("EXITO", "Cierre CICLO (" + reason + "). PnL: " + DoubleToString(totalProfit, 2));
+   lastRecoveryCloseTime = TimeCurrent(); 
+   maxCyclePeak = 0.0;
+}
+
+// -----------------------------------------------------------
+// UTILS TÉCNICAS
+// -----------------------------------------------------------
+double iFractalsGet(int handle, int mode, int shift) {
+   double buff[];
+   if(CopyBuffer(handle, (mode==0?0:1), shift, 1, buff) > 0) return buff[0];
+   return 0;
+}
+
+bool IsPriceGoodEntry(long type) {
+   if(!InpUsePullback) return true;
+   double currentPrice = (type == POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double emaValue = bufferMA[0];
+   double currentATR = GetEffectiveATR(); 
+   double rawDistance = MathAbs(currentPrice - emaValue);
+   if(rawDistance > (currentATR * InpATREntryDistance)) return false; 
+   return true;
+}
+
+bool IsM5MomentumFavorable(long type) {
+   if(!InpUseM5Confirm) return true;
+   double openM5 = iOpen(_Symbol, PERIOD_M5, 1);
+   double closeM5 = iClose(_Symbol, PERIOD_M5, 1);
+   if(type == POSITION_TYPE_BUY) return (closeM5 > openM5);
+   else if(type == POSITION_TYPE_SELL) return (closeM5 < openM5);
+   return true;
+}
+
+int GetH4Structure() {
+   if(!InpUseH4_Struct) return 0; 
+   double h1=0, h2=0, l1=0, l2=0;
+   int c=0;
+   for(int i=2; i<100; i++) {
+      double f = iFractalsGet(handleFractalsH4, 0, i);
+      if(f>0) { if(c==0) h1=f; else { h2=f; break; } c++; }
+   }
+   c=0;
+   for(int i=2; i<100; i++) {
+      double f = iFractalsGet(handleFractalsH4, 1, i);
+      if(f>0) { if(c==0) l1=f; else { l2=f; break; } c++; }
+   }
+   if(h1>h2 && l1>l2) return 1;  
+   if(l1<l2 && h1<h2) return -1; 
+   if(l1<l2) return -1; 
+   if(h1>h2) return 1;
+   return 0;
+}
+
+int CheckM15Breakout() {
+   double upF=0, loF=0;
+   for(int i=3; i<30; i++) {
+      double u = iFractalsGet(handleFractals, 0, i);
+      double l = iFractalsGet(handleFractals, 1, i);
+      if(upF==0 && u>0) upF=u;
+      if(loF==0 && l>0) loF=l;
+      if(upF>0 && loF>0) break;
+   }
+   double c1 = iClose(_Symbol, _Period, 1);
+   if(upF>0 && c1>upF) return 1;
+   if(loF>0 && c1<loF) return -1;
+   return 0;
+}
+
+double CalculateCurrentBasketNetProfit() {
+   double netPL = 0;
+   int total = PositionsTotal();
+   for(int i=0; i<total; i++) {
+      ulong t = PositionGetTicket(i);
+      if(PositionSelectByTicket(t) && PositionGetInteger(POSITION_MAGIC) == magicNum) {
+         netPL += PositionGetDouble(POSITION_PROFIT);
+         netPL += PositionGetDouble(POSITION_SWAP);
+         double vol = PositionGetDouble(POSITION_VOLUME);
+         double commissionCost = vol * InpCommissionPerLot;
+         netPL -= commissionCost; 
+      }
+   }
+   return netPL;
+}
+
+double CalculateVolatilityRiskInMoney() {
+    double totalLots = 0;
+    int total = PositionsTotal();
+    for(int i=0; i<total; i++) {
+        ulong t = PositionGetTicket(i);
+        if(PositionSelectByTicket(t) && PositionGetInteger(POSITION_MAGIC) == magicNum) totalLots += PositionGetDouble(POSITION_VOLUME);
+    }
+    if(totalLots <= 0) return 1.0;
+    double atrPoints = GetEffectiveATR() / _Point;
+    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+    if(tickValue == 0) tickValue = 1.0; 
+    return atrPoints * totalLots * tickValue;
+}
+
+// -----------------------------------------------------------
+// SMART HEALER (Con Bias de Balanceo)
+// -----------------------------------------------------------
+void CheckOp3Healing() {
+   if(!InpUseHealer) return;
+   
+   datetime startLookback = TimeCurrent() - 3600; 
+   if(HistorySelect(startLookback, TimeCurrent())) {
+      int deals = HistoryDealsTotal();
+      for(int i=deals-1; i>=0; i--) {
+         ulong ticket = HistoryDealGetTicket(i);
+         if(ticket <= lastHealedTicket) break; 
+         
+         if(HistoryDealGetInteger(ticket, DEAL_MAGIC) == magicNum) {
+            if(HistoryDealGetInteger(ticket, DEAL_ENTRY) == DEAL_ENTRY_OUT) {
+               double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT);
+               if(profit > 0) {
+                  ApplyHealing(profit);
+                  lastHealedTicket = ticket; 
+                  return; 
+               }
+            }
+         }
+      }
+   }
+}
+
+bool ApplyHealing(double profitAvailable) {
+   ulong worstTicket = 0;
+   double worstProfit = 1000000;
+   double worstPriceOpen = 0;
+   long worstType = 0;
+   
+   for(int i=PositionsTotal()-1; i>=0; i--) {
+      ulong t = PositionGetTicket(i);
+      if(PositionSelectByTicket(t) && PositionGetInteger(POSITION_MAGIC) == magicNum) {
+         double p = PositionGetDouble(POSITION_PROFIT);
+         if(p < worstProfit) {
+            worstProfit = p;
+            worstTicket = t;
+            worstPriceOpen = PositionGetDouble(POSITION_PRICE_OPEN);
+            worstType = PositionGetInteger(POSITION_TYPE);
+         }
+      }
+   }
+   
+   if(worstTicket == 0 || worstProfit >= 0) return true; 
+
+   double currentPrice = (worstType == POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double diffPoints = MathAbs(currentPrice - worstPriceOpen) / _Point;
+   if(diffPoints == 0) return true;
+   
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   if(tickValue == 0) tickValue = 1.0;
+   
+   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double costOfMinLot = (diffPoints * tickValue) * minLot; 
+
+   if(costOfMinLot > profitAvailable) return true; 
+
+   double budget = profitAvailable * 0.90; 
+   double lotsToClose = budget / (diffPoints * tickValue);
+   
+   double volStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   lotsToClose = MathFloor(lotsToClose / volStep) * volStep;
+   
+   if(lotsToClose >= minLot) {
+      if(trade.PositionClosePartial(worstTicket, lotsToClose)) {
+         WriteLog("HEALER", "Amputacion Tactica. Lotes: " + DoubleToString(lotsToClose, 2), worstProfit, budget);
+      }
+   }
+   return true;
+}
+
+// -----------------------------------------------------------
+// SMART GRINDER (SmartCut Logic + 2-SPEED TRAILING)
+// -----------------------------------------------------------
+void RunGrinder() {
+    if(!InpUseGrinder) return;
+    if(!CheckFreeMargin(InpGrinderLots, ORDER_TYPE_BUY)) return;
+
+    // A. Gestión de Time Stop (Limpieza)
+    int grinderOps = 0;
+    for(int i=PositionsTotal()-1; i>=0; i--) {
+        ulong t = PositionGetTicket(i);
+        if(PositionSelectByTicket(t) && PositionGetInteger(POSITION_MAGIC) == magicNum) {
+            // IDENTIFICAR GRINDER POR LOTAJE
+            if(PositionGetDouble(POSITION_VOLUME) == InpGrinderLots) {
+                grinderOps++;
+                // Time Stop Logic
+                datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
+                if(TimeCurrent() - openTime > (InpGrinderTimeStop * 60)) {
+                    double p = PositionGetDouble(POSITION_PROFIT);
+                    if(p < 0) { 
+                        trade.PositionClose(t);
+                        WriteLog("GRINDER", "TimeStop Activado. Limpiando zona.", p, 0);
+                        return; 
+                    }
+                }
+            }
+        }
+    }
+    if(grinderOps >= 1) return; // Solo 1 Grinder a la vez
+
+    // B. Lógica de Entrada (SmartCut M5)
+    double adx = bufferG_ADX[0];
+    double rsi = bufferG_RSI[0];
+    double closeM5 = iClose(_Symbol, PERIOD_M5, 0);
+    double maM5 = bufferG_MA[0]; 
+
+    // B1. Modo Scalper (Reversión) - ADX Bajo
+    if(adx < InpGrinderADX_Trend) {
+        if(rsi < InpGrinderRSI_OS) { 
+             trade.Buy(InpGrinderLots, _Symbol, SymbolInfoDouble(_Symbol, SYMBOL_ASK), 0, 0, "Grinder Scalp Buy");
+        }
+        else if(rsi > InpGrinderRSI_OB) { 
+             trade.Sell(InpGrinderLots, _Symbol, SymbolInfoDouble(_Symbol, SYMBOL_BID), 0, 0, "Grinder Scalp Sell");
+        }
+    }
+    // B2. Modo Surfer (Tendencia) - ADX Alto
+    else {
+        if(closeM5 > maM5 && rsi < 70) { 
+             trade.Buy(InpGrinderLots, _Symbol, SymbolInfoDouble(_Symbol, SYMBOL_ASK), 0, 0, "Grinder Surf Buy");
+        }
+        else if(closeM5 < maM5 && rsi > 30) { 
+             trade.Sell(InpGrinderLots, _Symbol, SymbolInfoDouble(_Symbol, SYMBOL_BID), 0, 0, "Grinder Surf Sell");
+        }
+    }
+}
+
+// --- NUEVA FUNCION: TRAILING EXCLUSIVO PARA GRINDER ---
+void ManageGrinderTrailing() {
+    if(!InpGrinderUseTrail) return;
+
+    for(int i=PositionsTotal()-1; i>=0; i--) {
+        ulong t = PositionGetTicket(i);
+        if(PositionSelectByTicket(t) && PositionGetInteger(POSITION_MAGIC) == magicNum) {
+            // SOLO APLICAMOS AL GRINDER (Identificado por lotaje)
+            if(PositionGetDouble(POSITION_VOLUME) == InpGrinderLots) {
+                
+                long type = PositionGetInteger(POSITION_TYPE);
+                double currentPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
+                double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+                double sl = PositionGetDouble(POSITION_SL);
+                
+                double points = 0;
+                if(type == POSITION_TYPE_BUY) points = (currentPrice - openPrice) / _Point;
+                else points = (openPrice - currentPrice) / _Point;
+
+                // Lógica 2-SPEED
+                int activeDist = InpGrinderTrailDist; // Velocidad Normal
+                if(points >= InpGrinderTurboTrig) activeDist = InpGrinderTurboDist; // Velocidad Turbo
+
+                if(points >= InpGrinderTrailStart) {
+                    double newSL = 0;
+                    bool update = false;
+
+                    if(type == POSITION_TYPE_BUY) {
+                        newSL = NormalizeDouble(currentPrice - (activeDist * _Point), _Digits);
+                        if(newSL > openPrice && (sl == 0 || newSL > sl)) update = true;
+                    }
+                    else {
+                        newSL = NormalizeDouble(currentPrice + (activeDist * _Point), _Digits);
+                        if(newSL < openPrice && (sl == 0 || newSL < sl)) update = true;
+                    }
+
+                    if(update) trade.PositionModify(t, newSL, 0);
+                }
+            }
+        }
+    }
+}
+
+// -----------------------------------------------------------
+// PROFIT BANKING
+// -----------------------------------------------------------
+void ManagePartialProfitBanking() {
+    if(!InpUseUnwindMode) return;
+    int total = PositionsTotal();
+    ulong bestTicket = 0;
+    double bestDist = -1.0; 
+    double bestMoney = -999999;
+    int myCount = 0;
+    double currentATR = GetEffectiveATR();
+    for(int i=0; i<total; i++) {
+       ulong t = PositionGetTicket(i);
+       if(PositionSelectByTicket(t) && PositionGetInteger(POSITION_MAGIC) == magicNum) {
+          myCount++;
+          double profit = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+          if(profit <= 0) continue;
+          double netProfit = profit - (PositionGetDouble(POSITION_VOLUME) * InpCommissionPerLot);
+          if(netProfit > bestMoney) bestMoney = netProfit;
+          long type = PositionGetInteger(POSITION_TYPE);
+          double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+          double currentPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
+          double rawDist = MathAbs(currentPrice - openPrice);
+          double atrMultiples = rawDist / currentATR;
+          if(atrMultiples > bestDist) { bestDist = atrMultiples; bestTicket = t; }
+       }
+    }
+    if(myCount < 2) return;
+    if(bestTicket > 0) {
+        if(bestDist >= InpUnwindATR_Mult || bestMoney >= InpUnwindMoney_Floor) {
+            trade.PositionClose(bestTicket);
+            WriteLog("UNWIND", "Profit Banking. Money: " + DoubleToString(bestMoney, 2), 0, 0);
+        }
+    }
+}
+
+// -----------------------------------------------------------
+// SENTINEL
+// -----------------------------------------------------------
+void CheckRescueEntry() {
+    if(!InpUseRescueMode) return;
+    int total = PositionsTotal();
+    int myCount = 0;
+    for(int i=0; i<total; i++) {
+        ulong t = PositionGetTicket(i);
+        if(PositionSelectByTicket(t) && PositionGetInteger(POSITION_MAGIC) == magicNum) myCount++;
+    }
+    if(myCount < 3) return; 
+
+    double currentDD = CalculateCurrentBasketNetProfit(); 
+    double absDD = MathAbs(currentDD);
+
+    double level2_Money = GetDynamicMoneyValue(InpDD_Percent_L2);
+    double level3_Money = GetDynamicMoneyValue(InpDD_Percent_L3);
+
+    double activeATRMult = InpRescueATR_Mult; 
+    bool ignoreRSI = false;
+    bool forceEntry = false;
+    
+    if(absDD > level2_Money) { activeATRMult = 3.0; ignoreRSI = true; }
+    if(absDD > level3_Money) { activeATRMult = 2.0; ignoreRSI = true; forceEntry = true; }
+
+    double volOp3 = 0;
+    double priceOp3 = 0;
+    long typeOp3 = -1;
+    datetime lastTime = 0;
+    
+    for(int i=0; i<total; i++) {
+        ulong t = PositionGetTicket(i);
+        if(PositionSelectByTicket(t) && PositionGetInteger(POSITION_MAGIC) == magicNum) {
+            if(PositionGetInteger(POSITION_TIME) > lastTime) {
+                lastTime = (datetime)PositionGetInteger(POSITION_TIME);
+                volOp3 = PositionGetDouble(POSITION_VOLUME);
+                priceOp3 = PositionGetDouble(POSITION_PRICE_OPEN);
+                typeOp3 = PositionGetInteger(POSITION_TYPE);
+            }
+        }
+    }
+
+    double currentATR = GetEffectiveATR();
+    double minDistance = currentATR * activeATRMult; 
+    double rsi = bufferRSI[0];
+    string comment = "Sentinel Op 4 (L1)";
+    if(absDD > level2_Money) comment = "Sentinel Op 4 (L2)";
+    if(absDD > level3_Money) comment = "Sentinel Op 4 (L3-CRITICO)";
+
+    bool signal = false;
+    
+    // NOTA: Op4 es RESCATE, por tanto DEBE seguir la dirección de Op3 para promediar.
+    if(typeOp3 == POSITION_TYPE_SELL) { 
+        double dist = SymbolInfoDouble(_Symbol, SYMBOL_BID) - priceOp3;
+        if(dist >= minDistance) {
+            if(ignoreRSI || rsi > InpRescueRSI) {
+               if(!forceEntry || IsM5MomentumFavorable(POSITION_TYPE_SELL)) signal = true;
+            }
+        }
+        if(signal && CheckFreeMargin(volOp3, ORDER_TYPE_SELL)) {
+            trade.Sell(volOp3, _Symbol, SymbolInfoDouble(_Symbol, SYMBOL_BID), 0, 0, comment);
+        }
+    }
+    else if(typeOp3 == POSITION_TYPE_BUY) { 
+        double dist = priceOp3 - SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+        if(dist >= minDistance) {
+            if(ignoreRSI || rsi < (100 - InpRescueRSI)) {
+               if(!forceEntry || IsM5MomentumFavorable(POSITION_TYPE_BUY)) signal = true;
+            }
+        }
+        if(signal && CheckFreeMargin(volOp3, ORDER_TYPE_BUY)) {
+            trade.Buy(volOp3, _Symbol, SymbolInfoDouble(_Symbol, SYMBOL_ASK), 0, 0, comment);
+        }
+    }
+}
+
+// ==================================================================
+// ON TICK (CORE)
+// ==================================================================
+void OnTick()
+{
+   if(CopyBuffer(handleATR, 0, 0, 3, bufferATR) < 0) return;
+   if(CopyBuffer(handleMA, 0, 0, 3, bufferMA) < 0) return;
+   if(CopyBuffer(handleRSI, 0, 0, 3, bufferRSI) < 0) return;
+   if(CopyBuffer(handleGrinderMA, 0, 0, 2, bufferG_MA) < 0) return;
+   if(CopyBuffer(handleGrinderADX, 0, 0, 2, bufferG_ADX) < 0) return;
+   if(CopyBuffer(handleGrinderRSI, 0, 0, 2, bufferG_RSI) < 0) return;
+
+   if(!CheckSpread()) return;
+
+   CheckOp3Healing();
+   ManagePartialProfitBanking(); 
+   ManageGrinderTrailing(); // NUEVO: Gestión de Trailing para Grinder
+
+   int totalPositions = PositionsTotal();
+   int buyCount = 0, sellCount = 0;
+   
+   for(int i = totalPositions - 1; i >= 0; i--) {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == magicNum) {
+         if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) buyCount++;
+         if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL) sellCount++;
+      }
+   }
+   int myPositions = buyCount + sellCount;
+
+   double currentATR = GetEffectiveATR();
+
+   // MONITOR DE SALIDA
+   if(myPositions > 0) {
+      double currentNetPL = CalculateCurrentBasketNetProfit();
+      double dynamicTarget = GetDynamicMoneyValue(InpBasketPercent);
+      if(dynamicTarget < 2.0) dynamicTarget = 2.0; 
+      
+      if(currentNetPL >= dynamicTarget) {
+         if(currentNetPL > maxCyclePeak) maxCyclePeak = currentNetPL;
+         
+         double allowedRetrace = InpFixedRetrace;
+         if(InpUseDynamicRetrace) {
+             double volMoney = CalculateVolatilityRiskInMoney();
+             allowedRetrace = volMoney * InpRetraceATRMult; 
+             if(allowedRetrace < 1.0) allowedRetrace = 1.0;
+             if(allowedRetrace > 50.0) allowedRetrace = 50.0;
+         }
+         
+         if(maxCyclePeak - currentNetPL >= allowedRetrace) {
+             CloseAllPositions("Basket Profit Trail");
+             return;
+         }
+      }
+      
+      if(myPositions >= 4 && InpUseRescueMode) {
+          double rescueTarget = GetDynamicMoneyValue(InpRescueTarget_Pct);
+          if(currentNetPL >= rescueTarget) {
+              CloseAllPositions("Rescue Mission Success");
+              return;
+          }
+      }
+   } else {
+       maxCyclePeak = 0.0; 
+   }
+
+   MqlDateTime dt; TimeCurrent(dt);
+   bool isFridayMode = (InpCloseFriday && dt.day_of_week == 5 && dt.hour >= InpFridayHour);
+   if(isFridayMode && myPositions > 0 && CalculateCurrentBasketNetProfit() > 0) { 
+       CloseAllPositions("Viernes Close"); return; 
+   }
+   bool isWeeklyStartWait = (dt.day_of_week == 0 || (dt.day_of_week == 1 && dt.hour < InpMondayStartHour));
+
+   int structH4 = GetH4Structure();
+   int signalM15 = CheckM15Breakout();
+   
+   // --- ESTADO 0: ENTRY ---
+   if(myPositions == 0) {
+      if(isFridayMode || isWeeklyStartWait) return;
+      if(lastRecoveryCloseTime > 0 && (TimeCurrent() - lastRecoveryCloseTime < InpCooldownSeconds)) return;
+      
+      double lots = CalculateLots(false);
+      
+      if(structH4 >= 0 && signalM15 == 1 && IsPriceGoodEntry(POSITION_TYPE_BUY)) {
+         if(bufferRSI[0] < InpEntryRSI_Max) {
+             if(CheckFreeMargin(lots, ORDER_TYPE_BUY)) {
+                 trade.Buy(lots, _Symbol, SymbolInfoDouble(_Symbol, SYMBOL_ASK), 0, 0, "SMC Buy Entry");
+             }
+         }
+      }
+      else if(structH4 <= 0 && signalM15 == -1 && IsPriceGoodEntry(POSITION_TYPE_SELL)) {
+         if(bufferRSI[0] > InpEntryRSI_Min) {
+             if(CheckFreeMargin(lots, ORDER_TYPE_SELL)) {
+                 trade.Sell(lots, _Symbol, SymbolInfoDouble(_Symbol, SYMBOL_BID), 0, 0, "SMC Sell Entry");
+             }
+         }
+      }
+   }
+
+   // --- ESTADO 1: HEDGE MONITOR ---
+   else if(myPositions == 1) {
+      for(int i = totalPositions - 1; i >= 0; i--) {
+         ulong ticket = PositionGetTicket(i);
+         if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == magicNum) {
+            double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+            long type = PositionGetInteger(POSITION_TYPE);
+            double currentLots = PositionGetDouble(POSITION_VOLUME);
+            double currentPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
+            double sl = PositionGetDouble(POSITION_SL);
+            
+            double profitPts = (type==POSITION_TYPE_BUY) ? (currentPrice-openPrice)/_Point : (openPrice-currentPrice)/_Point;
+            double lossPts   = (type==POSITION_TYPE_BUY) ? (openPrice-currentPrice)/_Point : (currentPrice-openPrice)/_Point;
+            
+            if(InpUseSmartTrail && profitPts > (currentATR*InpTrailActivate)/_Point) {
+                double trailDist = (currentATR*InpTrailDistATR);
+                double newSL = (type==POSITION_TYPE_BUY) ? currentPrice - trailDist : currentPrice + trailDist;
+                newSL = NormalizeDouble(newSL, _Digits);
+                bool modify = false;
+                if(type==POSITION_TYPE_BUY && newSL > openPrice && (sl==0 || newSL > sl)) modify=true;
+                if(type==POSITION_TYPE_SELL && newSL < openPrice && (sl==0 || newSL < sl)) modify=true;
+                if(modify) trade.PositionModify(ticket, newSL, 0);
+            }
+            
+            double atrPoints = currentATR / _Point;
+            double dynamicDist = atrPoints * InpHedgeATRMult;
+            double activeHedgeDist = MathMax((double)InpHedgeDist, dynamicDist);
+            
+            if(lossPts >= activeHedgeDist) {
+               trade.PositionModify(ticket, 0, 0); 
+               if(type == POSITION_TYPE_BUY) {
+                   if(CheckFreeMargin(currentLots, ORDER_TYPE_SELL)) trade.Sell(currentLots, _Symbol, SymbolInfoDouble(_Symbol, SYMBOL_BID), 0, 0, "Hedge Lock");
+               }
+               else {
+                   if(CheckFreeMargin(currentLots, ORDER_TYPE_BUY)) trade.Buy(currentLots, _Symbol, SymbolInfoDouble(_Symbol, SYMBOL_ASK), 0, 0, "Hedge Lock");
+               }
+            }
+            break; 
+         }
+      }
+   }
+
+   // --- ESTADO 2: RECOVERY ---
+   else if(myPositions == 2) {
+      datetime op2Time = 0;
+      for(int i=0; i<totalPositions; i++) {
+         ulong t = PositionGetTicket(i);
+         if(PositionSelectByTicket(t) && PositionGetInteger(POSITION_MAGIC) == magicNum) {
+             datetime pt = (datetime)PositionGetInteger(POSITION_TIME);
+             if(pt > op2Time) op2Time = pt;
+         }
+      }
+      if(TimeCurrent() - op2Time < InpMinTechWait) return;
+
+      double baseLots = CalculateLots(false);
+      double recoveryLots = baseLots * 2.0; 
+      if(recoveryLots > InpMaxRecoveryLots) recoveryLots = InpMaxRecoveryLots;
+
+      if(bufferATR[0] > bufferATR[1]) {
+         bool m5Buy  = IsM5MomentumFavorable(POSITION_TYPE_BUY);
+         bool m5Sell = IsM5MomentumFavorable(POSITION_TYPE_SELL);
+         
+         if(signalM15 == 1 || (m5Buy && signalM15 != -1)) { 
+             if(CheckFreeMargin(recoveryLots, ORDER_TYPE_BUY)) trade.Buy(recoveryLots, _Symbol, SymbolInfoDouble(_Symbol, SYMBOL_ASK), 0, 0, "Recovery Buy (V-Shape)");
+         }
+         
+         if(signalM15 == -1 || (m5Sell && signalM15 != 1)) { 
+             if(CheckFreeMargin(recoveryLots, ORDER_TYPE_SELL)) trade.Sell(recoveryLots, _Symbol, SymbolInfoDouble(_Symbol, SYMBOL_BID), 0, 0, "Recovery Sell (V-Shape)");
+         }
+      }
+   }
+   
+   // --- ESTADO 3+: TRAILING FLUIDO + SENTINEL + BIO-REACTOR ---
+   else if(myPositions >= 3) {
+      
+      // 1. Sentinel Op4
+      if(myPositions == 3) CheckRescueEntry();
+      
+      // 2. Grinder Bio-Reactor (SmartCut Inside)
+      if(myPositions >= 4) RunGrinder();
+
+      // 3. Trailing Op3 (Turbo)
+      if(InpUseOp3Trail) {
+         ulong ticketOp3 = 0;
+         datetime lastT = 0;
+         for(int i=0; i<totalPositions; i++) {
+            ulong t = PositionGetTicket(i);
+            if(PositionSelectByTicket(t) && PositionGetInteger(POSITION_MAGIC) == magicNum) {
+                // Filtramos que NO sea un trade del Grinder
+                if(PositionGetDouble(POSITION_VOLUME) != InpGrinderLots) {
+                    if(PositionGetInteger(POSITION_TIME) > lastT) {
+                        lastT = (datetime)PositionGetInteger(POSITION_TIME);
+                        ticketOp3 = t;
+                    }
+                }
+            }
+         }
+         
+         if(ticketOp3 > 0) {
+             double currentProfit = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+             if(currentProfit > 0) {
+                 long type = PositionGetInteger(POSITION_TYPE);
+                 double curPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
+                 double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+                 double sl = PositionGetDouble(POSITION_SL);
+                 double pts = (type==POSITION_TYPE_BUY) ? (curPrice-openPrice)/_Point : (openPrice-curPrice)/_Point;
+                 
+                 double startPts = (currentATR * InpOp3_StartATR) / _Point;
+                 double activeDist = (currentATR * InpOp3_BaseDistATR) / _Point;
+                 double turboTriggerPts = (currentATR * InpOp3_TurboTriggerATR) / _Point;
+                 
+                 if(pts >= turboTriggerPts) activeDist = (currentATR * InpOp3_TurboDistATR) / _Point;
+                 if(pts > startPts) {
+                     double newSL = (type==POSITION_TYPE_BUY) ? curPrice - (activeDist*_Point) : curPrice + (activeDist*_Point);
+                     newSL = NormalizeDouble(newSL, _Digits);
+                     bool mod = false;
+                     if(type==POSITION_TYPE_BUY && (sl==0 || newSL > sl)) mod=true;
+                     if(type==POSITION_TYPE_SELL && (sl==0 || newSL < sl)) mod=true;
+                     if(mod) trade.PositionModify(ticketOp3, newSL, 0);
+                 }
+             }
+         }
+      }
+   }
+}

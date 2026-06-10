@@ -1,0 +1,4 @@
+MetaTrader5
+psycopg2-binary
+pandas
+numpy
