@@ -69,6 +69,8 @@ usa otro sufijo de símbolo:
 
 Con MetaTrader 5 abierto y logueado, y la fila de `bot_config` en `status = 'ACTIVE'`:
 
+### Modo consola (clásico)
+
 ```powershell
 python -m bot.main
 ```
@@ -78,6 +80,33 @@ Salida esperada al iniciar:
 ```
 HYPER GRINDER v20.0 (Python) INICIADO.
 ```
+
+### Modo TUI (interfaz en terminal)
+
+Interfaz en vivo a pantalla completa:
+
+```powershell
+python -m bot.tui
+```
+
+Muestra, en tiempo real:
+
+- **Gráfica** de velas M15 (`plotext`) en la parte superior.
+- **HUD ENTRADA OP1** — tabla *actual vs requerido* de cada condición de entrada
+  (spread, estructura H4, señal M15, pullback, RSI, margen, gates de tiempo). Indica
+  cuántas condiciones faltan y si está `LISTO PARA ENTRAR`.
+- **LOG** de eventos en la parte inferior.
+
+Teclas:
+
+| Tecla | Acción |
+|-------|--------|
+| `p`   | Mostrar/ocultar panel de **parámetros** (valores actuales de `bot_config`) |
+| `q`   | Salir |
+
+El motor de trading corre en un hilo aparte; la TUI solo lee snapshots, no
+interfiere con la lógica de órdenes. Requiere `rich` y `plotext` (en
+`requirements.txt`).
 
 ### Modo sombra (pruebas sin órdenes reales)
 
@@ -112,13 +141,14 @@ Cierra la conexión a la DB y hace `shutdown()` de MetaTrader 5 de forma ordenad
 
 ```
 bot/
-  main.py        Entrypoint y bucle de polling (estilo OnTick)
+  main.py        Entrypoint consola: setup() / trading_loop() / shutdown()
+  tui.py         Interfaz de terminal en vivo (gráfica + HUD + log + params)
   config.py      Constantes de conexión, símbolo, timeframes
   broker.py      Capa de órdenes sobre MetaTrader5
-  strategy.py    Motor de estrategia (SentinelEngine)
+  strategy.py    Motor de estrategia (SentinelEngine) + snapshot HUD
   indicators.py  Indicadores técnicos
   db.py          Acceso a PostgreSQL (carga de bot_config)
-  logger.py      Logging a consola y CSV
+  logger.py      Logging a consola/CSV (+ sink para la TUI)
 schema.sql       Esquema de la base de datos
 requirements.txt Dependencias Python
 ```

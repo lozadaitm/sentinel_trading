@@ -10,8 +10,11 @@ import os
 
 
 class Logger:
-    def __init__(self, enable_file=True, file_name="Gold_HyperGrinder_v20", symbol="XAUUSD"):
+    def __init__(self, enable_file=True, file_name="Gold_HyperGrinder_v20", symbol="XAUUSD",
+                 console_print=True):
         self.enable_file = enable_file
+        self.console_print = console_print  # False cuando corre dentro de la TUI
+        self.sink = None  # callback opcional: sink(log_type, message, ts, price, lots, balance)
         self.path = None
         if enable_file:
             safe_symbol = symbol.replace("/", "_")
@@ -24,7 +27,13 @@ class Logger:
 
     def write(self, log_type, message, price=0.0, lots=0.0, balance=0.0):
         ts = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
-        print(f"[{log_type}] {message} | Price: {price:.2f} | Vol: {lots:.2f} | Bal: {balance:.2f}")
+        if self.console_print:
+            print(f"[{log_type}] {message} | Price: {price:.2f} | Vol: {lots:.2f} | Bal: {balance:.2f}")
+        if self.sink is not None:
+            try:
+                self.sink(log_type, message, ts, price, lots, balance)
+            except Exception:  # noqa: BLE001  (UI no debe tumbar el trading)
+                pass
         if self.enable_file and self.path:
             try:
                 with open(self.path, "a", newline="", encoding="ansi", errors="replace") as f:

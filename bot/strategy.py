@@ -44,11 +44,20 @@ DEFAULTS = {
 _LOT_EPS = 1e-8
 
 
+def _struct_txt(v):
+    return {1: "Alcista (+1)", -1: "Bajista (-1)"}.get(v, "Neutral (0)")
+
+
+def _sig_txt(v):
+    return {1: "Ruptura alza (+1)", -1: "Ruptura baja (-1)"}.get(v, "Sin ruptura (0)")
+
+
 class SentinelEngine:
     def __init__(self, broker, logger):
         self.b = broker
         self.log = logger
         self.cfg = {}
+        self.hud = {}  # snapshot read-only publicado cada tick para la TUI
 
         # Estado (globals del MQL5)
         self.last_recovery_close_time = 0
@@ -146,6 +155,100 @@ class SentinelEngine:
         if order_type == mt5.ORDER_TYPE_SELL:
             return self.m5_close1 < self.m5_open1
         return True
+
+    # ==============================================================
+    # HUD (snapshot read-only para la TUI; NO afecta el trading)
+    # ==============================================================
+    def _build_hud(self, struct_h4, signal_m15, is_friday_mode, is_weekly_start_wait):
+        """Construye el panel 'actual vs requerido' de las condiciones de Op1.
+
+        Espejo de lectura de los gates del ESTADO 0. Si la maquina de estados
+        cambia, este metodo debe seguirla (no comparte codigo a proposito,
+        para no arriesgar la logica de trading).
+        """
+        point = self.b.point()
+        bid = self.b.bid()
+        ask = self.b.ask()
+        spread = self.b.spread()
+        rsi = self.rsi0
+        ema = self.ema0
+        catr = self._effective_atr()
+        my_positions = len(self.b.positions())
+
+        if signal_m15 == 1:
+            side = "BUY"
+        elif signal_m15 == -1:
+            side = "SELL"
+        elif struct_h4 > 0:
+            side = "BUY?"
+        elif struct_h4 < 0:
+            side = "SELL?"
+        else:
+            side = "-"
+
+        gates = []
+        max_sp = int(self._p("inp_max_spread"))
+        gates.append(("Spread", str(spread), f"<= {max_sp}", spread <= max_sp))
+
+        if side.startswith("BUY"):
+            gates.append(("Estructura H4", _struct_txt(struct_h4), ">= 0 (alcista)", struct_h4 >= 0))
+            gates.append(("Senal M15", _sig_txt(signal_m15), "ruptura alza (+1)", signal_m15 == 1))
+            dist = abs(ask - ema)
+            maxd = catr * float(self._p("atr_entry_distance"))
+            ok_pb = (not self._p("use_pullback")) or dist <= maxd
+            gates.append(("Pullback EMA", f"{dist / point:.0f} pt", f"<= {maxd / point:.0f} pt", ok_pb))
+            rmax = int(self._p("entry_rsi_max"))
+            gates.append(("RSI (M15)", f"{rsi:.1f}", f"< {rmax}", rsi < rmax))
+            otype = mt5.ORDER_TYPE_BUY
+        elif side.startswith("SELL"):
+            gates.append(("Estructura H4", _struct_txt(struct_h4), "<= 0 (bajista)", struct_h4 <= 0))
+            gates.append(("Senal M15", _sig_txt(signal_m15), "ruptura baja (-1)", signal_m15 == -1))
+            dist = abs(bid - ema)
+            maxd = catr * float(self._p("atr_entry_distance"))
+            ok_pb = (not self._p("use_pullback")) or dist <= maxd
+            gates.append(("Pullback EMA", f"{dist / point:.0f} pt", f"<= {maxd / point:.0f} pt", ok_pb))
+            rmin = int(self._p("entry_rsi_min"))
+            gates.append(("RSI (M15)", f"{rsi:.1f}", f"> {rmin}", rsi > rmin))
+            otype = mt5.ORDER_TYPE_SELL
+        else:
+            gates.append(("Senal M15", _sig_txt(signal_m15), "ruptura +-1", False))
+            gates.append(("Estructura H4", _struct_txt(struct_h4), "definida", struct_h4 != 0))
+            gates.append(("RSI (M15)", f"{rsi:.1f}", "25 .. 75", 25 < rsi < 75))
+            otype = mt5.ORDER_TYPE_BUY
+
+        lots = self._calculate_lots(False)
+        margin_ok = self.b.check_free_margin(lots, otype)
+        gates.append(("Margen libre", f"{self.b.margin_free():.0f}", f"req {lots:.2f} lot", margin_ok))
+
+        if is_friday_mode:
+            gates.append(("Gate viernes", "ON", "OFF", False))
+        if is_weekly_start_wait:
+            gates.append(("Apertura semanal", "en espera", "abierto", False))
+        if self.last_recovery_close_time > 0:
+            elapsed = self.now - self.last_recovery_close_time
+            cd = int(self._p("cooldown_seconds"))
+            if elapsed < cd:
+                gates.append(("Cooldown", f"{cd - elapsed}s", "0s", False))
+
+        ready = (my_positions == 0 and side in ("BUY", "SELL") and all(g[3] for g in gates))
+        blockers = sum(1 for g in gates if not g[3])
+
+        self.hud = {
+            "status": None,
+            "symbol": config.SYMBOL,
+            "bid": bid, "ask": ask, "spread": spread,
+            "rsi": rsi, "ema": ema, "atr": catr,
+            "struct_h4": struct_h4, "signal_m15": signal_m15,
+            "balance": self.b.account_balance(),
+            "equity": self.b.account_equity(),
+            "positions": my_positions,
+            "side": side,
+            "lots": lots,
+            "gates": gates,
+            "ready": ready,
+            "blockers": blockers,
+            "server_time": self._server_dt().strftime("%H:%M:%S"),
+        }
 
     # ==============================================================
     # Calculos de cesta
@@ -450,7 +553,20 @@ class SentinelEngine:
     # ==============================================================
     def on_tick(self):
         if not self._compute_buffers():
+            self.hud = {"status": "Esperando datos de MT5 (warmup de indicadores)..."}
             return
+
+        struct_h4 = indicators.get_h4_structure(self.df_h4, self._p("use_h4_struct"))
+        signal_m15 = indicators.check_m15_breakout(self.df_m15)
+
+        dt = self._server_dt()
+        dow = (dt.weekday() + 1) % 7  # MQL5: domingo=0 ... sabado=6
+        hour = dt.hour
+        is_friday_mode = (self._p("close_friday") and dow == 5 and hour >= int(self._p("friday_hour")))
+        is_weekly_start_wait = (dow == 0 or (dow == 1 and hour < int(self._p("monday_start_hour"))))
+
+        # Snapshot read-only para la TUI (se publica aun si el tick sale temprano).
+        self._build_hud(struct_h4, signal_m15, is_friday_mode, is_weekly_start_wait)
 
         # Filtro de spread
         if self.b.spread() > int(self._p("inp_max_spread")):
@@ -497,18 +613,10 @@ class SentinelEngine:
         else:
             self.max_cycle_peak = 0.0
 
-        # Gates de tiempo (servidor)
-        dt = self._server_dt()
-        dow = (dt.weekday() + 1) % 7  # MQL5: domingo=0 ... sabado=6
-        hour = dt.hour
-        is_friday_mode = (self._p("close_friday") and dow == 5 and hour >= int(self._p("friday_hour")))
+        # Gate de cierre de viernes (usa flags ya calculados al inicio del tick)
         if is_friday_mode and my_positions > 0 and self._basket_net_profit() > 0:
             self._close_all("Viernes Close")
             return
-        is_weekly_start_wait = (dow == 0 or (dow == 1 and hour < int(self._p("monday_start_hour"))))
-
-        struct_h4 = indicators.get_h4_structure(self.df_h4, self._p("use_h4_struct"))
-        signal_m15 = indicators.check_m15_breakout(self.df_m15)
 
         # --- ESTADO 0: ENTRY ---
         if my_positions == 0:
