@@ -39,6 +39,11 @@ DEFAULTS = {
     "rescue_target_pct": 0.10, "dd_percent_l2": 3.0, "dd_percent_l3": 8.0,
     "fast_ma": 9, "atr_period": 14, "close_friday": True, "friday_hour": 20,
     "monday_start_hour": 10, "cooldown_seconds": 10,
+    # --- Nuevos (optimizaciones de esta revision) ---
+    "recovery_min_spacing_atr": 1.0,  # OP3 anti-espera v2: separacion minima por ATR del ultimo leg
+    "rescue_cooldown": 30,            # OP4: segundos minimos entre rescates (anti-spam de L3)
+    "grinder_cooldown": 120,          # OP11: segundos minimos entre aperturas de grinder (anti-churn)
+    "grinder_min_atr_points": 80,     # OP11: ATR minimo (pts) para permitir scalpeo
 }
 
 _LOT_EPS = 1e-8
@@ -63,6 +68,10 @@ class SentinelEngine:
         self.last_recovery_close_time = 0
         self.last_healed_ticket = 0
         self.max_cycle_peak = 0.0
+        self.cycle_armed = False      # trailing de cesta armado (OP8/OP9)
+        self.spread_high = False      # cache del filtro de spread del tick actual
+        self.last_rescue_time = 0     # cooldown de rescate (OP4)
+        self.last_grinder_open = 0    # cooldown de apertura de grinder (OP11)
 
         # Buffers del tick actual (rellenados por _compute_buffers)
         self.now = 0
@@ -80,12 +89,17 @@ class SentinelEngine:
         return self.cfg.get(key, DEFAULTS[key])
 
     def init_history_cursor(self):
-        """Init lastHealedTicket desde el ultimo deal de las ultimas 48h (OnInit MQL5 190-194)."""
-        to_dt = datetime.datetime.now()
-        from_dt = to_dt - datetime.timedelta(days=2)
+        """Init lastHealedTicket al mayor ticket existente (baseline del healer).
+
+        El cursor es por numero de ticket (independiente de zona horaria), por lo
+        que basta una ventana amplia. Se usa max(ticket) en vez de deals[-1] para
+        no depender del orden de retorno del broker.
+        """
+        to_dt = datetime.datetime.now() + datetime.timedelta(minutes=5)
+        from_dt = to_dt - datetime.timedelta(days=7)
         deals = self.b.history_deals(from_dt, to_dt)
         if deals:
-            self.last_healed_ticket = deals[-1].ticket
+            self.last_healed_ticket = max(d.ticket for d in deals)
 
     # ==============================================================
     # Utils numericas (UTILS MQL5)
@@ -97,6 +111,15 @@ class SentinelEngine:
         return max(self.atr0, self.b.point() * 150)
 
     def _is_grinder(self, p):
+        """RF-E: identifica al grinder por COMMENT (robusto), con fallback a lote.
+
+        El lote exacto chocaba con cualquier posicion que casualmente valiera
+        grinder_lots. El comment de apertura ("Grinder ...") es fiable; si el
+        broker lo recorta, cae al criterio de lote como respaldo.
+        """
+        comment = getattr(p, "comment", "") or ""
+        if "Grinder" in comment:
+            return True
         return abs(p.volume - float(self._p("grinder_lots"))) < _LOT_EPS
 
     # ==============================================================
@@ -133,6 +156,7 @@ class SentinelEngine:
                        balance=self.b.account_balance())
         self.last_recovery_close_time = self.now
         self.max_cycle_peak = 0.0
+        self.cycle_armed = False
 
     # ==============================================================
     # Filtros de entrada
@@ -253,12 +277,15 @@ class SentinelEngine:
     # ==============================================================
     # Calculos de cesta
     # ==============================================================
+    def _round_trip_commission(self, volume):
+        """RF-F: comision ida+vuelta. commission_per_lot se interpreta por lado."""
+        return volume * float(self._p("commission_per_lot")) * 2.0
+
     def _basket_net_profit(self):
-        commission = float(self._p("commission_per_lot"))
         net = 0.0
         for p in self.b.positions():
             net += p.profit + p.swap
-            net -= p.volume * commission
+            net -= self._round_trip_commission(p.volume)
         return net
 
     def _vol_risk_money(self):
@@ -272,24 +299,47 @@ class SentinelEngine:
     # SMART HEALER
     # ==============================================================
     def _check_healing(self):
+        """Healer: ACUMULA el profit de TODOS los deals ganadores nuevos desde el
+        cursor (no solo el mas reciente) y aplica una amputacion con ese 90%.
+
+        Cambios vs version previa:
+          - RF/bug: ya no se descartan los ganadores intermedios. El cursor avanza
+            al mayor ticket visto, pero el presupuesto suma TODOS los ganadores
+            nuevos (no salta solo al ultimo).
+          - Tiempo: se usa una ventana amplia y se filtra por ticket (el cursor),
+            evitando el desfase de zona horaria de datetime.now() vs server time.
+          - No se exige que un solo ganador cubra toda la perdida: se va curando
+            parcialmente con lo disponible en cada pasada.
+        """
         if not self._p("use_healer"):
             return
-        to_dt = datetime.datetime.now()
-        from_dt = to_dt - datetime.timedelta(hours=1)
+        to_dt = datetime.datetime.utcfromtimestamp(self.now) + datetime.timedelta(minutes=5)
+        from_dt = to_dt - datetime.timedelta(days=2)
         deals = self.b.history_deals(from_dt, to_dt)
-        for d in reversed(deals):
+        if not deals:
+            return
+
+        budget = 0.0
+        max_ticket = self.last_healed_ticket
+        for d in deals:
             if d.ticket <= self.last_healed_ticket:
-                break
-            if d.magic == self.b.magic and d.entry == mt5.DEAL_ENTRY_OUT:
-                if d.profit > 0:
-                    self._apply_healing(d.profit)
-                    self.last_healed_ticket = d.ticket
-                    return
+                continue
+            if d.ticket > max_ticket:
+                max_ticket = d.ticket
+            if d.magic == self.b.magic and d.entry == mt5.DEAL_ENTRY_OUT and d.profit > 0:
+                budget += d.profit  # acumula TODOS los ganadores nuevos
+
+        if max_ticket > self.last_healed_ticket:
+            self.last_healed_ticket = max_ticket
+        if budget > 0:
+            self._apply_healing(budget)
 
     def _apply_healing(self, profit_available):
         worst = None
         worst_profit = 1e9
         for p in self.b.positions():
+            if self._is_grinder(p):
+                continue  # no amputar los scalps del grinder
             if p.profit < worst_profit:
                 worst_profit = p.profit
                 worst = p
@@ -306,13 +356,15 @@ class SentinelEngine:
         min_lot = self.b.volume_min()
         cost_of_min_lot = (diff_points * tick_value) * min_lot
         if cost_of_min_lot > profit_available:
-            return
+            return  # ni el lote minimo cabe en el presupuesto disponible
 
         budget = profit_available * 0.90
         lots_to_close = budget / (diff_points * tick_value)
         import math
         vol_step = self.b.volume_step()
         lots_to_close = math.floor(lots_to_close / vol_step) * vol_step
+        if lots_to_close > worst.volume:
+            lots_to_close = worst.volume  # no cerrar mas de lo abierto
 
         if lots_to_close >= min_lot:
             res = self.b.close_partial(worst, lots_to_close, "Healer Amputacion")
@@ -327,16 +379,14 @@ class SentinelEngine:
         if not self._p("use_grinder"):
             return
         grinder_lots = float(self._p("grinder_lots"))
-        if not self.b.check_free_margin(grinder_lots, mt5.ORDER_TYPE_BUY):
-            return
 
-        # A. Time stop / limpieza
+        # A. Time stop / limpieza (corre siempre; limpia perdedores Y break-even)
         grinder_ops = 0
         time_stop = int(self._p("grinder_time_stop")) * 60
         for p in self.b.positions():
             if self._is_grinder(p):
                 grinder_ops += 1
-                if self.now - p.time > time_stop and p.profit < 0:
+                if self.now - p.time > time_stop and p.profit <= 0:
                     self.b.close_position(p, "Grinder TimeStop")
                     self.log.write("GRINDER", "TimeStop Activado. Limpiando zona.", p.profit,
                                    balance=self.b.account_balance())
@@ -344,24 +394,41 @@ class SentinelEngine:
         if grinder_ops >= 1:
             return  # Solo 1 Grinder a la vez
 
+        # --- Gates de apertura (OP11) ---
+        if self.spread_high:
+            return  # no scalpear con spread alto
+        if self.now - self.last_grinder_open < int(self._p("grinder_cooldown")):
+            return  # anti-churn: respeta cooldown tras el ultimo grinder
+        if (self.atr0 / self.b.point()) < int(self._p("grinder_min_atr_points")):
+            return  # mercado sin volatilidad: no scalpear
+        if not self.b.check_free_margin(grinder_lots, mt5.ORDER_TYPE_BUY):
+            return
+
         # B. Entrada SmartCut M5
         adx = self.g_adx0
         rsi = self.g_rsi0
         close_m5 = self.m5_close0
         ma_m5 = self.g_ema0
 
+        opened = False
         if adx < int(self._p("grinder_adx_trend")):
             # Modo Scalper (reversion) - ADX bajo
             if rsi < int(self._p("grinder_rsi_os")):
                 self.b.market_order(mt5.ORDER_TYPE_BUY, grinder_lots, "Grinder Scalp Buy")
+                opened = True
             elif rsi > int(self._p("grinder_rsi_ob")):
                 self.b.market_order(mt5.ORDER_TYPE_SELL, grinder_lots, "Grinder Scalp Sell")
+                opened = True
         else:
             # Modo Surfer (tendencia) - ADX alto
             if close_m5 > ma_m5 and rsi < 70:
                 self.b.market_order(mt5.ORDER_TYPE_BUY, grinder_lots, "Grinder Surf Buy")
+                opened = True
             elif close_m5 < ma_m5 and rsi > 30:
                 self.b.market_order(mt5.ORDER_TYPE_SELL, grinder_lots, "Grinder Surf Sell")
+                opened = True
+        if opened:
+            self.last_grinder_open = self.now
 
     def _grinder_trailing(self):
         if not self._p("grinder_use_trail"):
@@ -402,37 +469,45 @@ class SentinelEngine:
     # PROFIT BANKING (Unwind)
     # ==============================================================
     def _profit_banking(self):
+        """Banca una posicion ganadora SOLO si la cesta total ya es neta positiva.
+
+        Cambio clave: mientras el neto de la cesta sea <= 0 las ganadoras estan
+        CUBRIENDO a las perdedoras (hedge lock). Desarmar esa cobertura re-exponia
+        al perdedor desnudo (causa del -760 observado). Ahora el unwind respeta el
+        congelamiento: el hedge solo se cierra cuando el saldo TOTAL es positivo.
+
+        RF-C corregido: la condicion de dinero y la posicion elegida son la MISMA
+        (se banca la ganadora mas rica que cumpla el umbral, no se mezclan).
+        RF-F: comision ida+vuelta.
+        """
         if not self._p("use_unwind_mode"):
             return
-        commission = float(self._p("commission_per_lot"))
+        positions = self.b.positions()
+        if len(positions) < 2:
+            return
+
+        # FREEZE: no desarmar cobertura si la cesta sigue en negativo.
+        if self._basket_net_profit() <= 0:
+            return
+
         current_atr = self._effective_atr()
-
         best_pos = None
-        best_dist = -1.0
-        best_money = -999999.0
-        my_count = 0
-
-        for p in self.b.positions():
-            my_count += 1
-            profit = p.profit + p.swap
-            if profit <= 0:
+        best_money = -1e18
+        for p in positions:
+            money = p.profit + p.swap - self._round_trip_commission(p.volume)
+            if money <= 0:
                 continue
-            net_profit = profit - (p.volume * commission)
-            if net_profit > best_money:
-                best_money = net_profit
-            raw_dist = abs(p.price_current - p.price_open)
-            atr_multiples = raw_dist / current_atr if current_atr else 0.0
-            if atr_multiples > best_dist:
-                best_dist = atr_multiples
+            dist = abs(p.price_current - p.price_open) / current_atr if current_atr else 0.0
+            qualifies = (dist >= float(self._p("unwind_atr_mult"))
+                         or money >= float(self._p("unwind_money_floor")))
+            if qualifies and money > best_money:
+                best_money = money
                 best_pos = p
 
-        if my_count < 2:
-            return
         if best_pos is not None:
-            if best_dist >= float(self._p("unwind_atr_mult")) or best_money >= float(self._p("unwind_money_floor")):
-                self.b.close_position(best_pos, "Unwind Profit Banking")
-                self.log.write("UNWIND", f"Profit Banking. Money: {best_money:.2f}",
-                               balance=self.b.account_balance())
+            self.b.close_position(best_pos, "Unwind Profit Banking")
+            self.log.write("UNWIND", f"Profit Banking. Money: {best_money:.2f}",
+                           balance=self.b.account_balance())
 
     # ==============================================================
     # SENTINEL OP4 (Rescate)
@@ -440,9 +515,14 @@ class SentinelEngine:
     def _check_rescue(self):
         if not self._p("use_rescue_mode"):
             return
-        positions = self.b.positions()
+        if self.spread_high:
+            return  # no abrir martingala con spread alto
+        # Op3 / cesta = solo posiciones core (RF-I: excluye scalps del grinder)
+        positions = [p for p in self.b.positions() if not self._is_grinder(p)]
         if len(positions) < 3:
             return
+        if self.now - self.last_rescue_time < int(self._p("rescue_cooldown")):
+            return  # anti-spam (sobre todo en L3 "abre ahora")
 
         current_dd = self._basket_net_profit()
         abs_dd = abs(current_dd)
@@ -451,16 +531,16 @@ class SentinelEngine:
 
         active_atr_mult = float(self._p("rescue_atr_mult"))
         ignore_rsi = False
-        force_entry = False
+        immediate = False
         if abs_dd > level2:
             active_atr_mult = 3.0
             ignore_rsi = True
         if abs_dd > level3:
             active_atr_mult = 2.0
             ignore_rsi = True
-            force_entry = True
+            immediate = True  # L3 = ABRE AHORA (sin esperar distancia ni momentum)
 
-        # Op3 = ultima posicion abierta (por tiempo)
+        # Op3 = ultima posicion core abierta (por tiempo)
         last_time = 0
         vol_op3 = price_op3 = 0.0
         type_op3 = -1
@@ -484,21 +564,25 @@ class SentinelEngine:
 
         signal = False
         if type_op3 == mt5.POSITION_TYPE_SELL:
-            dist = self.b.bid() - price_op3
-            if dist >= min_distance:
-                if ignore_rsi or rsi > rescue_rsi:
-                    if not force_entry or self._m5_momentum(mt5.ORDER_TYPE_SELL):
-                        signal = True
+            if immediate:
+                signal = True  # L3: defensa inmediata
+            else:
+                dist = self.b.bid() - price_op3
+                if dist >= min_distance and (ignore_rsi or rsi > rescue_rsi):
+                    signal = True
             if signal and self.b.check_free_margin(vol_op3, mt5.ORDER_TYPE_SELL):
                 self.b.market_order(mt5.ORDER_TYPE_SELL, vol_op3, comment)
+                self.last_rescue_time = self.now
         elif type_op3 == mt5.POSITION_TYPE_BUY:
-            dist = price_op3 - self.b.ask()
-            if dist >= min_distance:
-                if ignore_rsi or rsi < (100 - rescue_rsi):
-                    if not force_entry or self._m5_momentum(mt5.ORDER_TYPE_BUY):
-                        signal = True
+            if immediate:
+                signal = True  # L3: defensa inmediata
+            else:
+                dist = price_op3 - self.b.ask()
+                if dist >= min_distance and (ignore_rsi or rsi < (100 - rescue_rsi)):
+                    signal = True
             if signal and self.b.check_free_margin(vol_op3, mt5.ORDER_TYPE_BUY):
                 self.b.market_order(mt5.ORDER_TYPE_BUY, vol_op3, comment)
+                self.last_rescue_time = self.now
 
     # ==============================================================
     # BUFFERS (equivalente a los CopyBuffer de OnTick)
@@ -568,9 +652,10 @@ class SentinelEngine:
         # Snapshot read-only para la TUI (se publica aun si el tick sale temprano).
         self._build_hud(struct_h4, signal_m15, is_friday_mode, is_weekly_start_wait)
 
-        # Filtro de spread
-        if self.b.spread() > int(self._p("inp_max_spread")):
-            return
+        # Spread: NO congela la gestion (RF-A). Solo bloquea aperturas que
+        # ANADEN riesgo (entrada, recovery, rescate, grinder). Cierres, trailing,
+        # healer y profit banking corren igual; el Hedge (proteccion) tambien.
+        self.spread_high = self.b.spread() > int(self._p("inp_max_spread"))
 
         # Subsistemas transversales
         self._check_healing()
@@ -578,22 +663,37 @@ class SentinelEngine:
         self._grinder_trailing()
 
         positions = self.b.positions()
-        buy_count = sum(1 for p in positions if p.type == mt5.POSITION_TYPE_BUY)
-        sell_count = sum(1 for p in positions if p.type == mt5.POSITION_TYPE_SELL)
-        my_positions = buy_count + sell_count
+        core_positions = [p for p in positions if not self._is_grinder(p)]
+        my_positions = len(positions)
+        core_count = len(core_positions)  # RF-I: estado por posiciones core (sin grinder)
 
         current_atr = self._effective_atr()
         point = self.b.point()
         digits = self.b.digits()
 
-        # MONITOR DE SALIDA
+        # ============================================================
+        # MONITOR DE SALIDA - trailing de cesta (OP8/OP9 unificados)
+        # Se ARMA cuando el neto alcanza el target; luego sigue el pico y cierra
+        # al retroceder. Deja correr tendencia favorable y asegura lo ganado.
+        # ============================================================
         if my_positions > 0:
             net_pl = self._basket_net_profit()
-            target = self._dynamic_money(float(self._p("basket_percent")))
-            if target < 2.0:
-                target = 2.0
+            arm_target = self._dynamic_money(float(self._p("basket_percent")))
+            if arm_target < 2.0:
+                arm_target = 2.0
+            # Cesta profunda (>=4 core): se arma antes, con el target de rescate.
+            if core_count >= 4 and self._p("use_rescue_mode"):
+                rescue_target = self._dynamic_money(float(self._p("rescue_target_pct")))
+                if rescue_target < 2.0:
+                    rescue_target = 2.0
+                if rescue_target < arm_target:
+                    arm_target = rescue_target
 
-            if net_pl >= target:
+            if not self.cycle_armed and net_pl >= arm_target:
+                self.cycle_armed = True
+                self.max_cycle_peak = net_pl
+
+            if self.cycle_armed:
                 if net_pl > self.max_cycle_peak:
                     self.max_cycle_peak = net_pl
                 allowed_retrace = float(self._p("fixed_retrace"))
@@ -601,16 +701,14 @@ class SentinelEngine:
                     vol_money = self._vol_risk_money()
                     allowed_retrace = vol_money * float(self._p("retrace_atr_mult"))
                     allowed_retrace = max(1.0, min(allowed_retrace, 50.0))
+                # RF-B: el retroceso se evalua SIEMPRE que este armado, aunque
+                # net_pl haya caido por debajo del target entre ticks.
                 if self.max_cycle_peak - net_pl >= allowed_retrace:
-                    self._close_all("Basket Profit Trail")
-                    return
-
-            if my_positions >= 4 and self._p("use_rescue_mode"):
-                rescue_target = self._dynamic_money(float(self._p("rescue_target_pct")))
-                if net_pl >= rescue_target:
-                    self._close_all("Rescue Mission Success")
+                    reason = "Rescue Mission Success" if core_count >= 4 else "Basket Profit Trail"
+                    self._close_all(reason)
                     return
         else:
+            self.cycle_armed = False
             self.max_cycle_peak = 0.0
 
         # Gate de cierre de viernes (usa flags ya calculados al inicio del tick)
@@ -619,7 +717,9 @@ class SentinelEngine:
             return
 
         # --- ESTADO 0: ENTRY ---
-        if my_positions == 0:
+        if core_count == 0:
+            if self.spread_high:
+                return
             if is_friday_mode or is_weekly_start_wait:
                 return
             if self.last_recovery_close_time > 0 and (self.now - self.last_recovery_close_time < int(self._p("cooldown_seconds"))):
@@ -636,8 +736,8 @@ class SentinelEngine:
                         self.b.market_order(mt5.ORDER_TYPE_SELL, lots, "SMC Sell Entry")
 
         # --- ESTADO 1: HEDGE MONITOR ---
-        elif my_positions == 1:
-            p = positions[0]
+        elif core_count == 1:
+            p = core_positions[0]
             if p.type == mt5.POSITION_TYPE_BUY:
                 profit_pts = (p.price_current - p.price_open) / point
                 loss_pts = (p.price_open - p.price_current) / point
@@ -670,9 +770,19 @@ class SentinelEngine:
                         self.b.market_order(mt5.ORDER_TYPE_BUY, p.volume, "Hedge Lock")
 
         # --- ESTADO 2: RECOVERY ---
-        elif my_positions == 2:
-            op2_time = max(p.time for p in positions)
-            if self.now - op2_time < int(self._p("min_tech_wait")):
+        elif core_count == 2:
+            if self.spread_high:
+                return
+            # Anti-espera v2 (OP3): tiempo minimo Y separacion por ATR del ultimo
+            # leg. Antes era solo un timer fijo de 60s; ahora ademas exige que el
+            # precio se haya movido >= ATR*spacing, para no apilar recovery en el
+            # mismo nivel (clustering) durante ruido.
+            last_leg = max(core_positions, key=lambda q: q.time)
+            if self.now - last_leg.time < int(self._p("min_tech_wait")):
+                return
+            ref_price = self.b.ask()
+            spacing = self._effective_atr() * float(self._p("recovery_min_spacing_atr"))
+            if abs(ref_price - last_leg.price_open) < spacing:
                 return
 
             base_lots = self._calculate_lots(False)
@@ -692,18 +802,15 @@ class SentinelEngine:
                         self.b.market_order(mt5.ORDER_TYPE_SELL, recovery_lots, "Recovery Sell (V-Shape)")
 
         # --- ESTADO 3+: SENTINEL + BIO-REACTOR + TRAILING OP3 ---
-        elif my_positions >= 3:
-            if my_positions == 3:
-                self._check_rescue()
-            if my_positions >= 4:
+        elif core_count >= 3:
+            self._check_rescue()            # RF-D: corre con >=3 core (no solo ==3)
+            if core_count >= 4:
                 self._run_grinder()
 
             if self._p("use_op3_trail"):
                 op3 = None
                 last_t = 0
-                for p in self.b.positions():
-                    if self._is_grinder(p):
-                        continue
+                for p in core_positions:
                     if p.time > last_t:
                         last_t = p.time
                         op3 = p
