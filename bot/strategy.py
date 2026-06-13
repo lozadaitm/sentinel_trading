@@ -595,8 +595,12 @@ class SentinelEngine:
         df["time"] = pd.to_datetime(df["time"], unit="s")
         return df
 
+    def _fetch_tick(self):
+        """Seam de datos: en vivo devuelve el tick de MT5; el backtest lo sobrescribe."""
+        return mt5.symbol_info_tick(config.SYMBOL)
+
     def _compute_buffers(self):
-        tick = mt5.symbol_info_tick(config.SYMBOL)
+        tick = self._fetch_tick()
         if tick is None:
             return False
         self.now = tick.time
