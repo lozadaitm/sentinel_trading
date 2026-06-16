@@ -36,6 +36,8 @@ def setup(logger=None):
     if logger is None:
         logger = Logger(enable_file=True, file_name="Gold_HyperGrinder_v20", symbol=config.SYMBOL)
 
+    logger.sink = db.insert_log  # persiste cada write() en bot_logs
+
     broker = Broker(logger, shadow=config.SHADOW_MODE)
     engine = SentinelEngine(broker, logger)
     engine.init_history_cursor()

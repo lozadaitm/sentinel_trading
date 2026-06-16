@@ -104,3 +104,23 @@ CREATE TABLE IF NOT EXISTS public.bot_config (
 INSERT INTO public.bot_config (user_id, symbol, is_active, status)
 VALUES ('81118671-d5ba-4d49-9fb3-4499b54a3d93', 'XAUUSD+', true, 'INACTIVE')
 ON CONFLICT (user_id, symbol) DO NOTHING;
+
+-- ==================================================================
+-- bot_logs  |  Persistencia de cada write() del Logger (sink en main.py).
+-- Insercion best-effort: si falla, NO debe tumbar el trading (ver db.insert_log).
+-- ==================================================================
+CREATE TABLE IF NOT EXISTS public.bot_logs (
+    id          BIGSERIAL    PRIMARY KEY,
+    user_id     UUID             NOT NULL,
+    symbol      TEXT             NOT NULL,
+    log_type    TEXT             NOT NULL,
+    message     TEXT             NOT NULL,
+    price       DOUBLE PRECISION DEFAULT 0.0,
+    lots        DOUBLE PRECISION DEFAULT 0.0,
+    balance     DOUBLE PRECISION DEFAULT 0.0,
+    created_at  TIMESTAMPTZ      NOT NULL DEFAULT NOW()
+);
+
+-- Consulta tipica: ultimos logs de un bot concreto.
+CREATE INDEX IF NOT EXISTS idx_bot_logs_user_symbol_ts
+    ON public.bot_logs (user_id, symbol, created_at DESC);
