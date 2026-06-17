@@ -25,3 +25,14 @@ CREATE TABLE IF NOT EXISTS public.bot_logs (
 
 CREATE INDEX IF NOT EXISTS idx_bot_logs_user_symbol_ts
     ON public.bot_logs (user_id, symbol, created_at DESC);
+
+-- ------------------------------------------------------------------
+-- 2026-06-17 | OP12: piso verde del trail de cesta para OP1 sola.
+--             Si el cierre del trail caeria bajo min_green con una sola
+--             posicion core (core_count == 1), se DESARMA y la entrada
+--             vuelve al Hedge Lock en vez de realizar una perdida. Con
+--             >=2 legs el banking de cesta queda intacto.
+--             Ver bot/strategy.py::on_tick (MONITOR DE SALIDA).
+-- ------------------------------------------------------------------
+ALTER TABLE public.bot_config
+    ADD COLUMN IF NOT EXISTS min_green_profit DOUBLE PRECISION DEFAULT 3.0;

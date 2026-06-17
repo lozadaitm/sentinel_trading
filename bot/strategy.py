@@ -44,6 +44,7 @@ DEFAULTS = {
     "rescue_cooldown": 30,            # OP4: segundos minimos entre rescates (anti-spam de L3)
     "grinder_cooldown": 120,          # OP11: segundos minimos entre aperturas de grinder (anti-churn)
     "grinder_min_atr_points": 80,     # OP11: ATR minimo (pts) para permitir scalpeo
+    "min_green_profit": 3.0,          # OP12: piso verde del trail en OP1 sola; bajo esto se desarma a hedge (no cierra rojo)
 }
 
 _LOT_EPS = 1e-8
@@ -708,9 +709,22 @@ class SentinelEngine:
                 # RF-B: el retroceso se evalua SIEMPRE que este armado, aunque
                 # net_pl haya caido por debajo del target entre ticks.
                 if self.max_cycle_peak - net_pl >= allowed_retrace:
-                    reason = "Rescue Mission Success" if core_count >= 4 else "Basket Profit Trail"
-                    self._close_all(reason)
-                    return
+                    # OP12: piso verde para OP1 SOLA (core_count == 1). Una entrada
+                    # desnuda nunca debe cerrarse en rojo por el trail; eso actuaria
+                    # como un SL y contradice la filosofia hedge-congela (OP2 congela
+                    # la perdida, no hay SL catastrofico). Si el cierre caeria bajo
+                    # min_green (reverson veloz que cruza el piso entre ticks), se
+                    # DESARMA y la posicion vuelve a ESTADO 1 este mismo tick para que
+                    # el Hedge Lock la cubra a hedge_dist. Con >=2 legs la cesta es
+                    # real: bankear el neto (con legs rojas individuales) es el
+                    # comportamiento deseado y se mantiene intacto.
+                    if core_count == 1 and net_pl < float(self._p("min_green_profit")):
+                        self.cycle_armed = False
+                        self.max_cycle_peak = 0.0
+                    else:
+                        reason = "Rescue Mission Success" if core_count >= 4 else "Basket Profit Trail"
+                        self._close_all(reason)
+                        return
         else:
             self.cycle_armed = False
             self.max_cycle_peak = 0.0

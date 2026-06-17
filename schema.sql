@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS public.bot_config (
     use_dynamic_retrace     BOOLEAN          DEFAULT true,
     retrace_atr_mult        DOUBLE PRECISION DEFAULT 0.1,
     fixed_retrace           DOUBLE PRECISION DEFAULT 2.0,
+    min_green_profit        DOUBLE PRECISION DEFAULT 3.0,
 
     -- 3. Cobertura (Sentinel)
     use_dynamic_hedge       BOOLEAN          DEFAULT true,
