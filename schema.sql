@@ -85,6 +85,13 @@ CREATE TABLE IF NOT EXISTS public.bot_config (
     dd_percent_l2           DOUBLE PRECISION DEFAULT 3.0,
     dd_percent_l3           DOUBLE PRECISION DEFAULT 8.0,
 
+    -- 9b. Supervivencia / respiro ante volatilidad anomala (Fork A)
+    use_vol_breaker         BOOLEAN          DEFAULT true,
+    vcb_atr_mult            DOUBLE PRECISION DEFAULT 2.8,
+    max_net_lots            DOUBLE PRECISION DEFAULT 1.0,
+    max_rescue_legs         INTEGER          DEFAULT 3,
+    use_recovery_h4_gate    BOOLEAN          DEFAULT true,
+
     -- 10. Otros
     fast_ma                 INTEGER          DEFAULT 9,
     atr_period              INTEGER          DEFAULT 14,

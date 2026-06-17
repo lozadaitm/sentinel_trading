@@ -45,6 +45,12 @@ DEFAULTS = {
     "grinder_cooldown": 120,          # OP11: segundos minimos entre aperturas de grinder (anti-churn)
     "grinder_min_atr_points": 80,     # OP11: ATR minimo (pts) para permitir scalpeo
     "min_green_profit": 3.0,          # OP12: piso verde del trail en OP1 sola; bajo esto se desarma a hedge (no cierra rojo)
+    # --- Fork A: respiro/supervivencia ante volatilidad anomala (noticia/manipulacion) ---
+    "use_vol_breaker": True,          # VCB: circuit breaker de volatilidad (bloquea aperturas, no la gestion)
+    "vcb_atr_mult": 2.8,              # VCB: dispara si el rango de la vela M15 en curso >= ATR * este mult
+    "max_net_lots": 1.0,              # tope DURO de exposicion neta core (long-short); 0 = desactivado
+    "max_rescue_legs": 3,             # cap de legs de Op4 por ciclo (acota el martingala)
+    "use_recovery_h4_gate": True,     # no promediar (recovery/rescue) contra la estructura H4 confirmada
 }
 
 _LOT_EPS = 1e-8
@@ -73,6 +79,9 @@ class SentinelEngine:
         self.spread_high = False      # cache del filtro de spread del tick actual
         self.last_rescue_time = 0     # cooldown de rescate (OP4)
         self.last_grinder_open = 0    # cooldown de apertura de grinder (OP11)
+        self.vol_breaker = False      # VCB activo este tick (Fork A)
+        self.vol_breaker_prev = False # para loguear solo las transiciones del VCB
+        self.struct_h4 = 0            # estructura H4 del tick (cache para gates de recovery/rescue)
 
         # Buffers del tick actual (rellenados por _compute_buffers)
         self.now = 0
@@ -122,6 +131,69 @@ class SentinelEngine:
         if "Grinder" in comment:
             return True
         return abs(p.volume - float(self._p("grinder_lots"))) < _LOT_EPS
+
+    # ==============================================================
+    # Fork A: respiro/supervivencia (VCB + tope neto + gate H4)
+    # ==============================================================
+    def _vol_breaker_active(self):
+        """Circuit breaker de volatilidad. True si la vela M15 EN CURSO es anomala
+        (rango high-low >= ATR * vcb_atr_mult). Mientras este activo se bloquean
+        SOLO las aperturas que ANADEN riesgo (entry, recovery, rescate, grinder),
+        igual que spread_high: el Hedge (proteccion), cierres, trailing y healer
+        siguen corriendo. Captura noticia, manipulacion o spikes fuera de calendario.
+        """
+        if not self._p("use_vol_breaker"):
+            return False
+        if self.df_m15 is None:
+            return False
+        bar_range = float(self.df_m15["high"].iloc[-1]) - float(self.df_m15["low"].iloc[-1])
+        atr = self._effective_atr()
+        if atr <= 0:
+            return False
+        return bar_range >= atr * float(self._p("vcb_atr_mult"))
+
+    def _net_exposure(self):
+        """Lotes netos de la cesta core (long - short). Excluye scalps del grinder."""
+        net = 0.0
+        for p in self.b.positions():
+            if self._is_grinder(p):
+                continue
+            net += p.volume if p.type == mt5.POSITION_TYPE_BUY else -p.volume
+        return net
+
+    def _net_cap_ok(self, lots, order_type):
+        """True si anadir `lots` en `order_type` no rompe max_net_lots. SIEMPRE
+        permite lo que REDUCE la magnitud del neto (p.ej. el hedge), aunque ya se
+        este sobre el tope; solo frena los adds que LO AGRANDAN mas alla del cap.
+        """
+        cap = float(self._p("max_net_lots"))
+        if cap <= 0:
+            return True  # tope desactivado
+        net = self._net_exposure()
+        delta = lots if order_type == mt5.ORDER_TYPE_BUY else -lots
+        new_net = net + delta
+        if abs(new_net) <= abs(net):
+            return True  # reduce o no cambia el neto: permitido
+        return abs(new_net) <= cap
+
+    def _h4_gate_ok(self, order_type):
+        """Bloquea promediar CONTRA la estructura H4 confirmada: no comprar si H4
+        es bajista, no vender si es alcista. El martingala vive en rangos y muere
+        en tendencias; este gate corta el apilado contra una tendencia macro.
+        """
+        if not self._p("use_recovery_h4_gate"):
+            return True
+        if order_type == mt5.ORDER_TYPE_BUY:
+            return self.struct_h4 >= 0
+        return self.struct_h4 <= 0
+
+    def _rescue_leg_count(self):
+        """Cuenta legs de Op4 abiertos (por comment), para acotar el martingala."""
+        n = 0
+        for p in self.b.positions():
+            if "Op 4" in (getattr(p, "comment", "") or ""):
+                n += 1
+        return n
 
     # ==============================================================
     # Lotaje y cierre total
@@ -396,8 +468,8 @@ class SentinelEngine:
             return  # Solo 1 Grinder a la vez
 
         # --- Gates de apertura (OP11) ---
-        if self.spread_high:
-            return  # no scalpear con spread alto
+        if self.spread_high or self.vol_breaker:
+            return  # no scalpear con spread alto ni en vela anomala (VCB)
         if self.now - self.last_grinder_open < int(self._p("grinder_cooldown")):
             return  # anti-churn: respeta cooldown tras el ultimo grinder
         if (self.atr0 / self.b.point()) < int(self._p("grinder_min_atr_points")):
@@ -516,12 +588,14 @@ class SentinelEngine:
     def _check_rescue(self):
         if not self._p("use_rescue_mode"):
             return
-        if self.spread_high:
-            return  # no abrir martingala con spread alto
+        if self.spread_high or self.vol_breaker:
+            return  # no abrir martingala con spread alto ni en vela anomala (VCB)
         # Op3 / cesta = solo posiciones core (RF-I: excluye scalps del grinder)
         positions = [p for p in self.b.positions() if not self._is_grinder(p)]
         if len(positions) < 3:
             return
+        if self._rescue_leg_count() >= int(self._p("max_rescue_legs")):
+            return  # cap de legs de Op4: acota el martingala (anti-blowup)
         if self.now - self.last_rescue_time < int(self._p("rescue_cooldown")):
             return  # anti-spam (sobre todo en L3 "abre ahora")
 
@@ -571,7 +645,9 @@ class SentinelEngine:
                 dist = self.b.bid() - price_op3
                 if dist >= min_distance and (ignore_rsi or rsi > rescue_rsi):
                     signal = True
-            if signal and self.b.check_free_margin(vol_op3, mt5.ORDER_TYPE_SELL):
+            if (signal and self._h4_gate_ok(mt5.ORDER_TYPE_SELL)
+                    and self._net_cap_ok(vol_op3, mt5.ORDER_TYPE_SELL)
+                    and self.b.check_free_margin(vol_op3, mt5.ORDER_TYPE_SELL)):
                 self.b.market_order(mt5.ORDER_TYPE_SELL, vol_op3, comment)
                 self.last_rescue_time = self.now
         elif type_op3 == mt5.POSITION_TYPE_BUY:
@@ -581,7 +657,9 @@ class SentinelEngine:
                 dist = price_op3 - self.b.ask()
                 if dist >= min_distance and (ignore_rsi or rsi < (100 - rescue_rsi)):
                     signal = True
-            if signal and self.b.check_free_margin(vol_op3, mt5.ORDER_TYPE_BUY):
+            if (signal and self._h4_gate_ok(mt5.ORDER_TYPE_BUY)
+                    and self._net_cap_ok(vol_op3, mt5.ORDER_TYPE_BUY)
+                    and self.b.check_free_margin(vol_op3, mt5.ORDER_TYPE_BUY)):
                 self.b.market_order(mt5.ORDER_TYPE_BUY, vol_op3, comment)
                 self.last_rescue_time = self.now
 
@@ -662,6 +740,18 @@ class SentinelEngine:
         # healer y profit banking corren igual; el Hedge (proteccion) tambien.
         self.spread_high = self.b.spread() > int(self._p("inp_max_spread"))
 
+        # VCB (Fork A): circuit breaker de volatilidad. Bloquea las aperturas que
+        # anaden riesgo durante velas anomalas (noticia/manipulacion/spike); la
+        # gestion (hedge, cierres, trailing, healer) sigue. Cachea la estructura H4
+        # para los gates de recovery/rescate. Solo se loguea la transicion on/off.
+        self.struct_h4 = struct_h4
+        self.vol_breaker = self._vol_breaker_active()
+        if self.vol_breaker != self.vol_breaker_prev:
+            estado = "ACTIVADO" if self.vol_breaker else "liberado"
+            self.log.write("VCB", f"Circuit breaker de volatilidad {estado}.",
+                           balance=self.b.account_balance())
+            self.vol_breaker_prev = self.vol_breaker
+
         # Subsistemas transversales
         self._check_healing()
         self._profit_banking()
@@ -736,7 +826,7 @@ class SentinelEngine:
 
         # --- ESTADO 0: ENTRY ---
         if core_count == 0:
-            if self.spread_high:
+            if self.spread_high or self.vol_breaker:
                 return
             if is_friday_mode or is_weekly_start_wait:
                 return
@@ -789,7 +879,7 @@ class SentinelEngine:
 
         # --- ESTADO 2: RECOVERY ---
         elif core_count == 2:
-            if self.spread_high:
+            if self.spread_high or self.vol_breaker:
                 return
             # Anti-espera v2 (OP3): tiempo minimo Y separacion por ATR del ultimo
             # leg. Antes era solo un timer fijo de 60s; ahora ademas exige que el
@@ -809,15 +899,19 @@ class SentinelEngine:
                 recovery_lots = float(self._p("max_recovery_lots"))
 
             if self.atr0 > self.atr1:
-                m5_buy = self._m5_momentum(mt5.ORDER_TYPE_BUY)
-                m5_sell = self._m5_momentum(mt5.ORDER_TYPE_SELL)
-
-                if signal_m15 == 1 or (m5_buy and signal_m15 != -1):
-                    if self.b.check_free_margin(recovery_lots, mt5.ORDER_TYPE_BUY):
-                        self.b.market_order(mt5.ORDER_TYPE_BUY, recovery_lots, "Recovery Buy (V-Shape)")
-                if signal_m15 == -1 or (m5_sell and signal_m15 != 1):
-                    if self.b.check_free_margin(recovery_lots, mt5.ORDER_TYPE_SELL):
-                        self.b.market_order(mt5.ORDER_TYPE_SELL, recovery_lots, "Recovery Sell (V-Shape)")
+                # OP3 (Fork A): direccion anclada a ESTRUCTURA H4, no a ruido M5. Si
+                # H4 acompana a la cesta se promedia; si H4 volteo en contra, el add
+                # cae al lado opuesto (de-risk con la tendencia) en vez de promediar
+                # contra el movimiento. Gateado por el tope de exposicion neta.
+                if struct_h4 > 0:
+                    rtype, label = mt5.ORDER_TYPE_BUY, "Recovery Buy (V-Shape)"
+                elif struct_h4 < 0:
+                    rtype, label = mt5.ORDER_TYPE_SELL, "Recovery Sell (V-Shape)"
+                else:
+                    rtype = None
+                if (rtype is not None and self._net_cap_ok(recovery_lots, rtype)
+                        and self.b.check_free_margin(recovery_lots, rtype)):
+                    self.b.market_order(rtype, recovery_lots, label)
 
         # --- ESTADO 3+: SENTINEL + BIO-REACTOR + TRAILING OP3 ---
         elif core_count >= 3:

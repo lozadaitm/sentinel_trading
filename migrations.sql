@@ -36,3 +36,17 @@ CREATE INDEX IF NOT EXISTS idx_bot_logs_user_symbol_ts
 -- ------------------------------------------------------------------
 ALTER TABLE public.bot_config
     ADD COLUMN IF NOT EXISTS min_green_profit DOUBLE PRECISION DEFAULT 3.0;
+
+-- ------------------------------------------------------------------
+-- 2026-06-18 | Fork A: respiro/supervivencia ante volatilidad anomala.
+--   VCB (circuit breaker de volatilidad) + tope de exposicion neta +
+--   cap de legs de Op4 + gate de estructura H4 para recovery/rescate.
+--   Evita el apilado de martingala contra una noticia/manipulacion que
+--   casi quema la cuenta el 2026.06.17 21:00. Ver bot/strategy.py.
+-- ------------------------------------------------------------------
+ALTER TABLE public.bot_config
+    ADD COLUMN IF NOT EXISTS use_vol_breaker      BOOLEAN          DEFAULT true,
+    ADD COLUMN IF NOT EXISTS vcb_atr_mult         DOUBLE PRECISION DEFAULT 2.8,
+    ADD COLUMN IF NOT EXISTS max_net_lots         DOUBLE PRECISION DEFAULT 1.0,
+    ADD COLUMN IF NOT EXISTS max_rescue_legs      INTEGER          DEFAULT 3,
+    ADD COLUMN IF NOT EXISTS use_recovery_h4_gate BOOLEAN          DEFAULT true;
