@@ -175,6 +175,7 @@ class SimBroker:
             "open_time": pos.time,
             "close_time": self.market.current_time,
             "profit": gross,
+            "balance": self.balance,  # balance de la cuenta despues de cerrar este deal
             "open_comment": pos.comment,
             "close_reason": reason,
         })

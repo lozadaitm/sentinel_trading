@@ -75,13 +75,31 @@ def format_summary(stats):
 
 
 def write_trades_csv(path, closed_trades):
-    cols = ["ticket", "side", "volume", "open_time", "close_time",
-            "open_price", "close_price", "profit", "open_comment", "close_reason"]
+    """Volcado legible: una fila por deal cerrado, columnas en el orden pedido.
+
+    tipo_interno   : comentario del script (Grinder/SMC/Hedge/Recovery/OP3...)
+    direccion      : BUY o SELL
+    precio_entrada : precio de apertura
+    precio_salida  : precio de cierre
+    balance_cuenta : balance de la cuenta despues de cerrar este deal
+    pl             : profit/loss bruto del deal
+    timestamp      : momento del cierre (UTC)
+    """
+    header = ["tipo_interno", "direccion", "precio_entrada", "precio_salida",
+              "balance_cuenta", "pl", "timestamp"]
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(cols + ["open_dt", "close_dt"])
+        w.writerow(header)
         for t in closed_trades:
-            w.writerow([t[c] for c in cols] + [_fmt_ts(t["open_time"]), _fmt_ts(t["close_time"])])
+            w.writerow([
+                t["open_comment"],
+                t["side"],
+                t["open_price"],
+                t["close_price"],
+                f"{t['balance']:.2f}",
+                f"{t['profit']:.2f}",
+                _fmt_ts(t["close_time"]),
+            ])
 
 
 def write_equity_csv(path, equity_curve):
