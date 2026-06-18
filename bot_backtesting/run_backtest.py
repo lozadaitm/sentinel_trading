@@ -13,6 +13,7 @@ lookahead), simula el broker y corre el SentinelEngine real en cada paso.
 import argparse
 import datetime
 import os
+import sys
 
 from bot import config
 from bot.logger import Logger
@@ -99,6 +100,12 @@ def run_backtest(balance, start_date, end_date, symbol=config.SYMBOL,
 
 
 def main():
+    # Sin argumentos -> TUI guiada (el usuario solo inicia el backtester y este lo guia).
+    if len(sys.argv) == 1:
+        from .gui import run_gui
+        run_gui()
+        return
+
     ap = argparse.ArgumentParser(description="Backtest del bot Sentinel (motor real, datos de MT5).")
     ap.add_argument("--balance", type=float, required=True, help="Balance inicial de la cuenta")
     ap.add_argument("--start-date", required=True, help="YYYY-MM-DD (inicio del periodo, UTC)")

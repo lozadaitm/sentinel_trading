@@ -31,8 +31,22 @@ abierto y logueado al correr `run_backtest`.
 
 ## Uso
 
-Una sola orden. El backtester descarga las velas de MT5 por sí mismo para el
-periodo pedido (más un margen de calentamiento para los indicadores):
+### Modo guiado (TUI, recomendado)
+
+Inicia el backtester sin argumentos y la interfaz (rich) te guía paso a paso
+(balance, fechas, símbolo, salida), confirma, descarga las velas de MT5 y muestra
+el resultado en paneles:
+
+```
+python -m bot_backtesting.gui
+# equivalente:
+python -m bot_backtesting.run_backtest        (sin argumentos)
+```
+
+### Modo CLI (un solo comando con flags)
+
+El backtester descarga las velas de MT5 por sí mismo para el periodo pedido (más
+un margen de calentamiento para los indicadores):
 
 ```
 python -m bot_backtesting.run_backtest --balance 5000 \
