@@ -95,7 +95,8 @@ Muestra, en tiempo real:
 - **HUD ENTRADA OP1** — tabla *actual vs requerido* de cada condición de entrada
   (spread, estructura H4, señal M15, pullback, RSI, margen, gates de tiempo). Indica
   cuántas condiciones faltan y si está `LISTO PARA ENTRAR`.
-- **LOG** de eventos en la parte inferior.
+- **LOG** de eventos en la parte inferior, en vivo (los mismos eventos que el
+  modo consola).
 
 Teclas:
 
@@ -148,7 +149,7 @@ bot/
   strategy.py    Motor de estrategia (SentinelEngine) + snapshot HUD
   indicators.py  Indicadores técnicos
   db.py          Acceso a PostgreSQL (carga de bot_config)
-  logger.py      Logging a consola/CSV (+ sink para la TUI)
+  logger.py      Logging con multiples sinks: consola/CSV + DB (bot_logs) + buffer de la TUI
 schema.sql       Esquema de la base de datos
 requirements.txt Dependencias Python
 ```
