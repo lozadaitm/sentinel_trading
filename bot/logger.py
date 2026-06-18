@@ -41,4 +41,11 @@ class Logger:
                         [ts, log_type, message, f"{price:.2f}", f"{lots:.2f}", f"{balance:.2f}"]
                     )
             except OSError as e:
-                print(f"[LOG-ERROR] No se pudo escribir CSV: {e}")
+                # No imprimir a consola: bajo QuickEdit un print desde el hilo
+                # del worker congelaria el trading. Reportar via sink si existe.
+                if self.sink is not None:
+                    try:
+                        self.sink("ERROR", f"No se pudo escribir CSV: {e}",
+                                  ts, price, lots, balance)
+                    except Exception:  # noqa: BLE001
+                        pass

@@ -208,6 +208,7 @@ def build_layout(layout, engine, log_buf, show_params, size):
 # Main
 # ------------------------------------------------------------------
 def run_tui():
+    botmain.disable_quickedit()
     console = Console()
     log_buf = LogBuffer()
 

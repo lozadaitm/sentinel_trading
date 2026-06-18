@@ -11,6 +11,8 @@ El cuerpo se parte en setup() / trading_loop() / shutdown() para que la TUI
 pueda reutilizar el mismo motor en un hilo aparte sin duplicar logica.
 """
 
+import ctypes
+import os
 import time
 
 import MetaTrader5 as mt5
@@ -20,6 +22,32 @@ from .broker import Broker
 from .db import Database
 from .logger import Logger
 from .strategy import SentinelEngine
+
+
+def disable_quickedit():
+    """Desactiva QuickEdit Mode de la consola de Windows.
+
+    Con QuickEdit ON, hacer click o seleccionar texto en la consola suspende
+    cualquier hilo que escriba a stdout hasta presionar Enter/Esc. Eso congela
+    la UI de la TUI (y, si el worker llega a imprimir, tambien el trading).
+    Lo apagamos al arrancar. No-op fuera de Windows o si falla.
+    """
+    if os.name != "nt":
+        return
+    try:
+        kernel32 = ctypes.windll.kernel32
+        STD_INPUT_HANDLE = -10
+        ENABLE_QUICK_EDIT = 0x0040
+        ENABLE_EXTENDED_FLAGS = 0x0080
+        handle = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+        mode = ctypes.c_uint()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return
+        # Hay que setear EXTENDED_FLAGS para que limpiar QUICK_EDIT surta efecto.
+        new_mode = (mode.value & ~ENABLE_QUICK_EDIT) | ENABLE_EXTENDED_FLAGS
+        kernel32.SetConsoleMode(handle, new_mode)
+    except Exception:  # noqa: BLE001  (nunca debe tumbar el arranque)
+        pass
 
 
 def setup(logger=None):
@@ -89,6 +117,7 @@ def shutdown(db):
 
 
 def run():
+    disable_quickedit()
     db, broker, engine, logger = setup()
     try:
         trading_loop(db, engine, logger)
