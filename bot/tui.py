@@ -214,7 +214,7 @@ def run_tui():
 
     logger = Logger(enable_file=True, file_name="Gold_HyperGrinder_v20",
                     symbol=config.SYMBOL, console_print=False)
-    logger.sink = log_buf.add
+    logger.add_sink(log_buf.add)
 
     try:
         db, broker, engine, logger = botmain.setup(logger=logger)

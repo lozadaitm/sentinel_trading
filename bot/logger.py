@@ -14,7 +14,9 @@ class Logger:
                  console_print=True):
         self.enable_file = enable_file
         self.console_print = console_print  # False cuando corre dentro de la TUI
-        self.sink = None  # callback opcional: sink(log_type, message, ts, price, lots, balance)
+        # Lista de callbacks: sink(log_type, message, ts, price, lots, balance).
+        # Multiples sinks pueden coexistir (p.ej. DB + buffer de la TUI).
+        self.sinks = []
         self.path = None
         if enable_file:
             safe_symbol = symbol.replace("/", "_")
@@ -25,13 +27,18 @@ class Logger:
                         ["time", "type", "message", "price", "lots", "balance"]
                     )
 
+    def add_sink(self, fn):
+        """Registra un callback que recibe cada write(). No reemplaza los previos."""
+        if fn is not None:
+            self.sinks.append(fn)
+
     def write(self, log_type, message, price=0.0, lots=0.0, balance=0.0):
         ts = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
         if self.console_print:
             print(f"[{log_type}] {message} | Price: {price:.2f} | Vol: {lots:.2f} | Bal: {balance:.2f}")
-        if self.sink is not None:
+        for sink in self.sinks:
             try:
-                self.sink(log_type, message, ts, price, lots, balance)
+                sink(log_type, message, ts, price, lots, balance)
             except Exception:  # noqa: BLE001  (UI no debe tumbar el trading)
                 pass
         if self.enable_file and self.path:
@@ -42,10 +49,10 @@ class Logger:
                     )
             except OSError as e:
                 # No imprimir a consola: bajo QuickEdit un print desde el hilo
-                # del worker congelaria el trading. Reportar via sink si existe.
-                if self.sink is not None:
+                # del worker congelaria el trading. Reportar via sinks si existen.
+                for sink in self.sinks:
                     try:
-                        self.sink("ERROR", f"No se pudo escribir CSV: {e}",
-                                  ts, price, lots, balance)
+                        sink("ERROR", f"No se pudo escribir CSV: {e}",
+                             ts, price, lots, balance)
                     except Exception:  # noqa: BLE001
                         pass
