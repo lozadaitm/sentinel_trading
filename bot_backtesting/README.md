@@ -7,12 +7,15 @@ Lo que se prueba aquí es exactamente el mismo código que opera en vivo.
 ## Arquitectura
 
 ```
+fetch_data    descarga M15/M5/H4 reales de MT5 a memoria (fetch_frames); el
+              run_backtest la llama solo, no hace falta generar CSVs antes
 Market        feed historico M15/M5/H4 (sin lookahead: decide al cierre de barra)
 SimBroker     broker simulado: posiciones, balance/equity/margen, SL auto-close,
               cierres parciales, deals para el Healer, stop-out de margen
 BacktestEngine  = SentinelEngine real, solo sobrescribe los 2 seams de datos
                 (_fetch_tick, _rates). Toda la logica de trading es heredada.
-run_backtest  itera barras, corre engine.on_tick() y registra equity/trades
+run_backtest  descarga datos, itera barras, corre engine.on_tick() y registra
+              equity/trades
 metrics       net profit, drawdown, win rate, profit factor, etc.
 ```
 
@@ -22,36 +25,40 @@ metrics       net profit, drawdown, win rate, profit factor, etc.
 pip install MetaTrader5 pandas numpy
 ```
 
-`MetaTrader5` se importa solo por sus constantes (ORDER_TYPE/POSITION_TYPE/...);
-**no requiere terminal abierto** para el backtest. Sí lo requiere `fetch_data`.
+`MetaTrader5` se importa por sus constantes (ORDER_TYPE/POSITION_TYPE/...) y, en
+el nuevo flujo, **también para descargar las velas**: el terminal debe estar
+abierto y logueado al correr `run_backtest`.
 
-## Flujo de uso
+## Uso
 
-### 1. Conseguir datos
+Una sola orden. El backtester descarga las velas de MT5 por sí mismo para el
+periodo pedido (más un margen de calentamiento para los indicadores):
 
-**Opción A — datos reales desde MT5** (recomendado):
+```
+python -m bot_backtesting.run_backtest --balance 5000 \
+    --start-date 2026-06-12 --end-date 2026-06-16 [--output bot_backtesting/results]
+```
+
+Argumentos:
+- `--balance` (requerido): balance inicial de la cuenta.
+- `--start-date` / `--end-date` (requeridos): periodo `YYYY-MM-DD` (UTC). `end-date`
+  es **inclusivo** (cubre todo ese día).
+- `--output` (opcional): directorio para `trades.csv` y `equity.csv`
+  (default `bot_backtesting/results`).
+- `--symbol` (opcional): default `config.SYMBOL`.
+- `--warmup-days` (opcional): días descargados antes de `start-date` para calentar
+  indicadores (default 45; la estructura H4 necesita ~25 días de mercado).
+
+Imprime el resumen y vuelca `output/trades.csv` y `output/equity.csv`.
+
+### Export a CSV (opcional)
+
+`fetch_data` y `gen_sample_data` siguen existiendo para cachear/inspeccionar datos,
+pero ya **no son un paso previo obligatorio** del backtest:
 ```
 python -m bot_backtesting.fetch_data --start 2024-01-01 --end 2024-12-31 \
     --out-dir bot_backtesting/data
 ```
-Genera `XAUUSD+_M15.csv`, `XAUUSD+_M5.csv`, `XAUUSD+_H4.csv`.
-
-**Opción B — datos sintéticos** (solo smoke-test, precio inventado):
-```
-python -m bot_backtesting.gen_sample_data --days 200 --out-dir bot_backtesting/data
-```
-
-### 2. Correr el backtest
-```
-python -m bot_backtesting.run_backtest --data-dir bot_backtesting/data \
-    --balance 5000 --out-dir bot_backtesting/results [--start 2024-03-01] [--end 2024-09-01]
-```
-Imprime el resumen y vuelca `results/trades.csv` y `results/equity.csv`.
-
-## Formato CSV de datos
-
-Columnas requeridas: `time` (epoch segundos, hora del servidor), `open`, `high`,
-`low`, `close`. (El export de MT5 ya las trae.)
 
 ## Modelo de simulación (supuestos)
 

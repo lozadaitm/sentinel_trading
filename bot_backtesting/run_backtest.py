@@ -1,11 +1,13 @@
 """Runner del backtest.
 
 Uso:
-    python -m bot_backtesting.run_backtest --data-dir bot_backtesting/data \
-        --balance 5000 --out-dir bot_backtesting/results [--start 2024-01-01] [--end 2024-06-01]
+    python -m bot_backtesting.run_backtest --balance 5000 \
+        --start-date 2026-06-12 --end-date 2026-06-16 [--output ruta/o/dir]
 
-Itera barra a barra sobre M15 (decision en el cierre, sin lookahead), simula el
-broker y corre el SentinelEngine real en cada paso.
+El backtester descarga las velas (M15/M5/H4) directamente de MT5 para el periodo
+pedido (mas un margen de calentamiento para los indicadores). No hace falta
+generar CSVs antes. Itera barra a barra sobre M15 (decision en el cierre, sin
+lookahead), simula el broker y corre el SentinelEngine real en cada paso.
 """
 
 import argparse
@@ -16,32 +18,44 @@ from bot import config
 from bot.logger import Logger
 
 from . import metrics
-from .config_bt import DATA_FILES, INITIAL_BALANCE, SYMBOL_SPECS, make_params
-from .market import Market, load_frames
+from .config_bt import SYMBOL_SPECS, make_params
+from .fetch_data import fetch_frames
+from .market import Market
 from .sim_broker import SimBroker
 from .sim_engine import BacktestEngine
 
-
-def _iso_to_epoch(s):
-    if not s:
-        return None
-    dt = datetime.datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
-    return int(dt.timestamp())
+# Margen (dias) descargado ANTES de start_date para calentar indicadores. La
+# estructura H4 mira hasta ~150 barras (=25 dias de mercado); 45 dias calendario
+# dan holgura aun descontando fines de semana sin cotizacion.
+DEFAULT_WARMUP_DAYS = 45
 
 
-def _file_map(data_dir, symbol):
-    safe = symbol.replace("/", "_")
-    return {tf: os.path.join(data_dir, pat.format(symbol=safe)) for tf, pat in DATA_FILES.items()}
+def _parse_date(s):
+    return datetime.datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
 
 
-def run_backtest(data_dir, symbol=config.SYMBOL, balance=INITIAL_BALANCE,
-                 out_dir=None, start=None, end=None, params=None, progress_every=0):
-    frames = load_frames(_file_map(data_dir, symbol))
+def run_backtest(balance, start_date, end_date, symbol=config.SYMBOL,
+                 output=None, params=None, warmup_days=DEFAULT_WARMUP_DAYS,
+                 progress_every=0):
+    """Descarga datos de MT5 para [start_date, end_date] y corre el backtest.
 
-    end_epoch = _iso_to_epoch(end)
-    if end_epoch:
-        for tf in list(frames):
-            frames[tf] = frames[tf][frames[tf]["time"] <= end_epoch].reset_index(drop=True)
+    start_date / end_date: 'YYYY-MM-DD' (UTC). end_date es inclusivo (cubre todo
+    el dia). output: directorio donde escribir trades.csv y equity.csv (opcional).
+    """
+    start_dt = _parse_date(start_date)
+    # end inclusivo: hasta el final del dia end_date.
+    end_dt = _parse_date(end_date) + datetime.timedelta(days=1)
+    fetch_from = start_dt - datetime.timedelta(days=warmup_days)
+
+    start_epoch = int(start_dt.timestamp())
+    end_epoch = int(end_dt.timestamp())
+
+    frames = fetch_frames(symbol, fetch_from, end_dt, verbose=bool(progress_every))
+    # Estricto: open_time < medianoche del dia siguiente a end_date. Asi se incluye
+    # la ultima barra de end_date (abre 23:45, cierra 00:00) pero NO la primera del
+    # dia posterior (que abriria justo en el limite).
+    for tf in list(frames):
+        frames[tf] = frames[tf][frames[tf]["time"] < end_epoch].reset_index(drop=True)
 
     market = Market(frames)
     logger = Logger(enable_file=False, console_print=False)
@@ -49,7 +63,7 @@ def run_backtest(data_dir, symbol=config.SYMBOL, balance=INITIAL_BALANCE,
     engine = BacktestEngine(broker, logger, market)
     engine.cfg = params if params is not None else make_params()
 
-    start_i = market.start_index_for(_iso_to_epoch(start))
+    start_i = market.start_index_for(start_epoch)
     n = len(market)
     stop_out = SYMBOL_SPECS.get("stop_out_level", 0)
 
@@ -76,33 +90,35 @@ def run_backtest(data_dir, symbol=config.SYMBOL, balance=INITIAL_BALANCE,
     stats = metrics.compute(equity_curve, broker.closed_trades, balance, broker.balance,
                             blown=broker.blown)
 
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
-        metrics.write_trades_csv(os.path.join(out_dir, "trades.csv"), broker.closed_trades)
-        metrics.write_equity_csv(os.path.join(out_dir, "equity.csv"), equity_curve)
+    if output:
+        os.makedirs(output, exist_ok=True)
+        metrics.write_trades_csv(os.path.join(output, "trades.csv"), broker.closed_trades)
+        metrics.write_equity_csv(os.path.join(output, "equity.csv"), equity_curve)
 
     return stats, broker, equity_curve
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Backtest del bot Sentinel (motor real).")
-    ap.add_argument("--data-dir", default=os.path.join("bot_backtesting", "data"))
-    ap.add_argument("--symbol", default=config.SYMBOL)
-    ap.add_argument("--balance", type=float, default=INITIAL_BALANCE)
-    ap.add_argument("--out-dir", default=os.path.join("bot_backtesting", "results"))
-    ap.add_argument("--start", default=None, help="YYYY-MM-DD")
-    ap.add_argument("--end", default=None, help="YYYY-MM-DD")
+    ap = argparse.ArgumentParser(description="Backtest del bot Sentinel (motor real, datos de MT5).")
+    ap.add_argument("--balance", type=float, required=True, help="Balance inicial de la cuenta")
+    ap.add_argument("--start-date", required=True, help="YYYY-MM-DD (inicio del periodo, UTC)")
+    ap.add_argument("--end-date", required=True, help="YYYY-MM-DD (fin inclusivo del periodo, UTC)")
+    ap.add_argument("--output", default=os.path.join("bot_backtesting", "results"),
+                    help="Directorio para trades.csv y equity.csv (opcional)")
+    ap.add_argument("--symbol", default=config.SYMBOL, help=f"Simbolo (default {config.SYMBOL})")
+    ap.add_argument("--warmup-days", type=int, default=DEFAULT_WARMUP_DAYS,
+                    help="Dias de calentamiento descargados antes de start-date")
     ap.add_argument("--progress-every", type=int, default=0, help="imprime avance cada N barras")
     args = ap.parse_args()
 
     stats, _broker, _eq = run_backtest(
-        data_dir=args.data_dir, symbol=args.symbol, balance=args.balance,
-        out_dir=args.out_dir, start=args.start, end=args.end,
+        balance=args.balance, start_date=args.start_date, end_date=args.end_date,
+        symbol=args.symbol, output=args.output, warmup_days=args.warmup_days,
         progress_every=args.progress_every,
     )
     print(metrics.format_summary(stats))
-    if args.out_dir:
-        print(f"\nCSV en: {args.out_dir}/trades.csv , {args.out_dir}/equity.csv")
+    if args.output:
+        print(f"\nCSV en: {args.output}/trades.csv , {args.output}/equity.csv")
 
 
 if __name__ == "__main__":
