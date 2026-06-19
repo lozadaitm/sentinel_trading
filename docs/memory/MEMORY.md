@@ -1,0 +1,4 @@
+- [Bot -$760 root cause](bot-760-root-cause.md) — Profit Banking desarmaba el hedge; auditoría redflags + fixes aplicados
+- [Bot design constraints](bot-design-constraints.md) — restricciones del usuario: no emergency-stop, no SL catastrófico, OP2 congela pérdida, healer cura con 90%
+- [Workflow implementar+commit](workflow-implement-then-commit.md) — cambios del bot: implementar→commit→push directo; no backtest sin pedirlo (arnés es bar-close, no testea spikes intra-vela)
+- [OP1 rojas: Healer vs reset](op1-red-closes-healer-vs-reset.md) — distinguir cierres rojos de OP1 por Healer (diseño) vs reset manual de balance, cruzando reporte con logs DB
