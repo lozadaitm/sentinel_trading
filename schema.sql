@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS public.bot_config (
     -- 4. Healer inteligente
     use_healer              BOOLEAN          DEFAULT true,
     healer_balance_bias     BOOLEAN          DEFAULT true,
+    healer_min_core         INTEGER          DEFAULT 3,
     use_unwind_mode         BOOLEAN          DEFAULT true,
     unwind_atr_mult         DOUBLE PRECISION DEFAULT 2.0,
     unwind_money_floor      DOUBLE PRECISION DEFAULT 30.0,

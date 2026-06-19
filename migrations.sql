@@ -50,3 +50,14 @@ ALTER TABLE public.bot_config
     ADD COLUMN IF NOT EXISTS max_net_lots         DOUBLE PRECISION DEFAULT 1.0,
     ADD COLUMN IF NOT EXISTS max_rescue_legs      INTEGER          DEFAULT 3,
     ADD COLUMN IF NOT EXISTS use_recovery_h4_gate BOOLEAN          DEFAULT true;
+
+-- ------------------------------------------------------------------
+-- 2026-06-19 | Healer: gate de profundidad de cesta.
+--   El Healer solo ampu­ta cuando hay >= healer_min_core posiciones core
+--   (OP3/OP4+). Con OP1 sola (core==1) la cobertura es el Hedge Lock, no
+--   la amputacion; con OP1+Hedge (core==2) el hedge ya congela. Antes el
+--   Healer amputaba a cualquier core y realizaba en rojo entradas que aun
+--   debian cubrirse. Ver bot/strategy.py::_check_healing.
+-- ------------------------------------------------------------------
+ALTER TABLE public.bot_config
+    ADD COLUMN IF NOT EXISTS healer_min_core INTEGER DEFAULT 3;
