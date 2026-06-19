@@ -23,7 +23,7 @@ DEFAULTS = {
     "use_basket_close": True, "basket_percent": 0.15, "commission_per_lot": 6.0,
     "use_dynamic_retrace": True, "retrace_atr_mult": 0.1, "fixed_retrace": 2.0,
     "use_dynamic_hedge": True, "hedge_dist": 350, "hedge_atr_mult": 2.0,
-    "use_healer": True, "healer_balance_bias": True, "use_unwind_mode": True,
+    "use_healer": True, "healer_balance_bias": True, "healer_min_core": 3, "use_unwind_mode": True,
     "unwind_atr_mult": 2.0, "unwind_money_floor": 30.0,
     "use_grinder": True, "grinder_lots": 0.05, "grinder_time_stop": 45,
     "grinder_adx_trend": 30, "grinder_rsi_ob": 70, "grinder_rsi_os": 30,
@@ -386,6 +386,17 @@ class SentinelEngine:
         """
         if not self._p("use_healer"):
             return
+
+        # Gate de profundidad: el Healer solo ampu­ta en cestas reales (OP3/OP4+).
+        # Con OP1 sola (core==1) la cobertura correcta es el Hedge Lock (congela la
+        # perdida en ESTADO 1); con OP1+Hedge (core==2) el hedge ya congela. Amputar
+        # antes realizaria en rojo una entrada que aun debe cubrirse. Se sale ANTES de
+        # tocar el cursor para NO consumir presupuesto: los ganadores nuevos se siguen
+        # acumulando y quedan disponibles cuando la cesta llega a OP3+.
+        core_count = sum(1 for p in self.b.positions() if not self._is_grinder(p))
+        if core_count < int(self._p("healer_min_core")):
+            return
+
         to_dt = datetime.datetime.utcfromtimestamp(self.now) + datetime.timedelta(minutes=5)
         from_dt = to_dt - datetime.timedelta(days=2)
         deals = self.b.history_deals(from_dt, to_dt)
