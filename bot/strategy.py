@@ -74,6 +74,8 @@ class SentinelEngine:
         # Estado (globals del MQL5)
         self.last_recovery_close_time = 0
         self.last_healed_ticket = 0
+        self.cycle_realized = 0.0            # B: P&L realizado del ciclo en curso (para el freeze del Unwind)
+        self._healer_needs_rebaseline = True  # C: al iniciar ciclo, rebasa el cursor del Healer (presupuesto por ciclo)
         self.max_cycle_peak = 0.0
         self.cycle_armed = False      # trailing de cesta armado (OP8/OP9)
         self.spread_high = False      # cache del filtro de spread del tick actual
@@ -230,6 +232,8 @@ class SentinelEngine:
         self.last_recovery_close_time = self.now
         self.max_cycle_peak = 0.0
         self.cycle_armed = False
+        self.cycle_realized = 0.0             # B: cierra el ciclo -> reinicia el realizado
+        self._healer_needs_rebaseline = True  # C: el proximo ciclo rebasa el cursor del Healer
 
     # ==============================================================
     # Filtros de entrada
@@ -411,7 +415,17 @@ class SentinelEngine:
             if d.ticket > max_ticket:
                 max_ticket = d.ticket
             if d.magic == self.b.magic and d.entry == mt5.DEAL_ENTRY_OUT and d.profit > 0:
-                budget += d.profit  # acumula TODOS los ganadores nuevos
+                budget += d.profit  # acumula los ganadores nuevos DEL CICLO
+
+        # C: presupuesto acotado al ciclo. Al arrancar un ciclo nuevo se rebasa el
+        # cursor al ultimo ticket para NO contar verdes de ciclos ya cerrados. Antes
+        # se acumulaban cross-ciclo (cursor congelado mientras core<3) y disparaban
+        # una amputacion gigante al llegar la primera cesta a OP3+. Ver docs/memory:
+        # healer-budget-accumulates-across-cycles.
+        if self._healer_needs_rebaseline:
+            self.last_healed_ticket = max_ticket
+            self._healer_needs_rebaseline = False
+            return  # este pass no ampu­ta: el presupuesto del ciclo arranca en cero
 
         if max_ticket > self.last_healed_ticket:
             self.last_healed_ticket = max_ticket
@@ -419,31 +433,31 @@ class SentinelEngine:
             self._apply_healing(budget)
 
     def _apply_healing(self, profit_available):
+        # Peor leg por DINERO REAL = profit + swap (antes solo miraba p.profit e
+        # ignoraba el swap acumulado, que en holds largos puede ser material).
         worst = None
-        worst_profit = 1e9
+        worst_money = 1e9
         for p in self.b.positions():
             if self._is_grinder(p):
                 continue  # no amputar los scalps del grinder
-            if p.profit < worst_profit:
-                worst_profit = p.profit
+            money = p.profit + p.swap
+            if money < worst_money:
+                worst_money = money
                 worst = p
-        if worst is None or worst_profit >= 0:
+        if worst is None or worst_money >= 0 or worst.volume <= 0:
             return
 
-        point = self.b.point()
-        current_price = self.b.bid() if worst.type == mt5.POSITION_TYPE_BUY else self.b.ask()
-        diff_points = abs(current_price - worst.price_open) / point
-        if diff_points == 0:
-            return
-
-        tick_value = self.b.tick_value()
+        # Costo real por lote = P&L (precio + swap) prorrateado por volumen. Es exacto
+        # porque el P&L de la posicion escala lineal con el volumen (mismo precio de
+        # apertura); reemplaza al calculo por diff_points, que no consideraba swap.
+        cost_per_lot = -worst_money / worst.volume
         min_lot = self.b.volume_min()
-        cost_of_min_lot = (diff_points * tick_value) * min_lot
+        cost_of_min_lot = cost_per_lot * min_lot
         if cost_of_min_lot > profit_available:
             return  # ni el lote minimo cabe en el presupuesto disponible
 
         budget = profit_available * 0.90
-        lots_to_close = budget / (diff_points * tick_value)
+        lots_to_close = budget / cost_per_lot
         import math
         vol_step = self.b.volume_step()
         lots_to_close = math.floor(lots_to_close / vol_step) * vol_step
@@ -453,8 +467,14 @@ class SentinelEngine:
         if lots_to_close >= min_lot:
             res = self.b.close_partial(worst, lots_to_close, "Healer Amputacion")
             if res is None or getattr(res, "retcode", None) == mt5.TRADE_RETCODE_DONE:
+                # B: registra la perdida realizada (incl. swap, prorrateada por el
+                # volumen cerrado) en el acumulado del ciclo, para que el freeze del
+                # Unwind la tenga en cuenta y la amputacion NO levante el neto flotante
+                # abriendo la cobertura (cascade). Ver docs/memory: healer-unwind-hedge-cascade.
+                frac = lots_to_close / worst.volume
+                self.cycle_realized += worst_money * frac
                 self.log.write("HEALER", f"Amputacion Tactica. Lotes: {lots_to_close:.2f}",
-                               worst_profit, budget, self.b.account_balance())
+                               worst_money, budget, self.b.account_balance())
 
     # ==============================================================
     # SMART GRINDER
@@ -472,6 +492,7 @@ class SentinelEngine:
                 grinder_ops += 1
                 if self.now - p.time > time_stop and p.profit <= 0:
                     self.b.close_position(p, "Grinder TimeStop")
+                    self.cycle_realized += p.profit + p.swap  # B: realizado del ciclo (incl. swap)
                     self.log.write("GRINDER", "TimeStop Activado. Limpiando zona.", p.profit,
                                    balance=self.b.account_balance())
                     return
@@ -570,8 +591,13 @@ class SentinelEngine:
         if len(positions) < 2:
             return
 
-        # FREEZE: no desarmar cobertura si la cesta sigue en negativo.
-        if self._basket_net_profit() <= 0:
+        # FREEZE (B): no desarmar cobertura si el P&L TOTAL del ciclo (realizado +
+        # flotante) sigue en negativo. Antes se miraba SOLO el flotante, y una
+        # amputacion del Healer (que realiza rojo y sube el flotante remanente) abria
+        # el gate y bancaba el hedge -> cesta desnuda -> stop-out. Al incluir lo ya
+        # realizado en el ciclo, la amputacion es NEUTRA para el freeze (mueve dinero
+        # de flotante a realizado sin cambiar la suma) y la cascade queda rota.
+        if self.cycle_realized + self._basket_net_profit() <= 0:
             return
 
         current_atr = self._effective_atr()
@@ -590,6 +616,7 @@ class SentinelEngine:
 
         if best_pos is not None:
             self.b.close_position(best_pos, "Unwind Profit Banking")
+            self.cycle_realized += best_pos.profit + best_pos.swap  # B: acumula lo realizado del ciclo
             self.log.write("UNWIND", f"Profit Banking. Money: {best_money:.2f}",
                            balance=self.b.account_balance())
 
@@ -772,6 +799,13 @@ class SentinelEngine:
         core_positions = [p for p in positions if not self._is_grinder(p)]
         my_positions = len(positions)
         core_count = len(core_positions)  # RF-I: estado por posiciones core (sin grinder)
+
+        # Red de seguridad de ciclo (B/C): si NO hay cesta core (cerro por _close_all,
+        # stop-out del broker o SL), reinicia el realizado del ciclo y marca rebaseline
+        # del Healer. Cubre los finales de ciclo que no pasan por _close_all.
+        if core_count == 0:
+            self.cycle_realized = 0.0
+            self._healer_needs_rebaseline = True
 
         current_atr = self._effective_atr()
         point = self.b.point()
