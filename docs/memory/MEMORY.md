@@ -2,3 +2,6 @@
 - [Bot design constraints](bot-design-constraints.md) — restricciones del usuario: no emergency-stop, no SL catastrófico, OP2 congela pérdida, healer cura con 90%
 - [Workflow implementar+commit](workflow-implement-then-commit.md) — cambios del bot: implementar→commit→push directo; no backtest sin pedirlo (arnés es bar-close, no testea spikes intra-vela)
 - [OP1 rojas: Healer vs reset](op1-red-closes-healer-vs-reset.md) — distinguir cierres rojos de OP1 por Healer (diseño) vs reset manual de balance, cruzando reporte con logs DB
+- [Healer comment en deal de cierre](healer-comment-on-close-deal.md) — "Healer Amputacion" vive en el deal OUT, nunca en una op abierta (55/55 son out)
+- [Cascade Healer+Unwind → stop-out](healer-unwind-hedge-cascade.md) — causa raíz de los 2 blowups: al abrir OP3, Healer+Unwind desarman el hedge y dejan la cesta desnuda (-20k en stop-outs)
+- [Presupuesto Healer acumulado](healer-budget-accumulates-across-cycles.md) — cursor congelado en core<3 acumula verdes cross-ciclo; por eso amputa OP1 en rojo tras rachas ganadoras
