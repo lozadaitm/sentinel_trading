@@ -61,3 +61,13 @@ ALTER TABLE public.bot_config
 -- ------------------------------------------------------------------
 ALTER TABLE public.bot_config
     ADD COLUMN IF NOT EXISTS healer_min_core INTEGER DEFAULT 3;
+
+-- ------------------------------------------------------------------
+-- 2026-07-07 | bot_logs: ticket de la operacion + logging mas verbose.
+--   Se persiste el ticket MT5 de cada evento con posicion asociada
+--   (aperturas: ENTRADA/PROTECCION/RECOVERY/RESCATE/GRINDER; cierres:
+--   HEALER/UNWIND/GRINDER/CIERRE). 0 para eventos sin ticket (SYSTEM/VCB/EXITO).
+--   Ver bot/logger.py, bot/db.py::insert_log, bot/broker.py::market_order.
+-- ------------------------------------------------------------------
+ALTER TABLE public.bot_logs
+    ADD COLUMN IF NOT EXISTS ticket BIGINT DEFAULT 0;

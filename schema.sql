@@ -127,6 +127,7 @@ CREATE TABLE IF NOT EXISTS public.bot_logs (
     price       DOUBLE PRECISION DEFAULT 0.0,
     lots        DOUBLE PRECISION DEFAULT 0.0,
     balance     DOUBLE PRECISION DEFAULT 0.0,
+    ticket      BIGINT           DEFAULT 0,
     created_at  TIMESTAMPTZ      NOT NULL DEFAULT NOW()
 );
 

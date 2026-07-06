@@ -88,6 +88,40 @@ class Broker:
     # --------------------------------------------------------------
     # Ordenes
     # --------------------------------------------------------------
+    @staticmethod
+    def _open_log_type(comment):
+        """Mapea el comment de apertura a un log_type analizable en bot_logs."""
+        c = comment or ""
+        if c.startswith("Grinder"):
+            return "GRINDER"
+        if c.startswith("Hedge"):
+            return "PROTECCION"
+        if c.startswith("Recovery"):
+            return "RECOVERY"
+        if c.startswith("Sentinel Op 4"):
+            return "RESCATE"
+        if c.startswith("SMC"):
+            return "ENTRADA"
+        return "OPERACION"
+
+    def _log_open(self, res, order_type, lots, price, comment):
+        """Loguea el resultado de una apertura: evento con ticket si fue aceptada,
+        o ERROR con el retcode si el broker la rechazo. Nunca tumba el trading."""
+        side = "BUY" if order_type == mt5.ORDER_TYPE_BUY else "SELL"
+        bal = self.account_balance()
+        if res is None:
+            self.logger.write("ERROR", f"Apertura {side} '{comment}' sin respuesta del broker.",
+                              price, lots, bal)
+            return
+        ticket = getattr(res, "order", 0) or 0
+        if getattr(res, "retcode", None) == mt5.TRADE_RETCODE_DONE:
+            self.logger.write(self._open_log_type(comment), f"Apertura {side}: {comment}",
+                              price, lots, bal, ticket=ticket)
+        else:
+            rc = getattr(res, "retcode", "?")
+            self.logger.write("ERROR", f"Apertura {side} '{comment}' RECHAZADA (retcode {rc}).",
+                              price, lots, bal, ticket=ticket)
+
     def market_order(self, order_type, lots, comment):
         if self.shadow:
             self.logger.write("SHADOW", f"ORDER {('BUY' if order_type==mt5.ORDER_TYPE_BUY else 'SELL')} {comment}", 0, lots)
@@ -105,7 +139,9 @@ class Broker:
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": mt5.ORDER_FILLING_IOC,
         }
-        return mt5.order_send(request)
+        res = mt5.order_send(request)
+        self._log_open(res, order_type, lots, price, comment)
+        return res
 
     def _close_volume(self, position, volume, comment):
         order_type = (

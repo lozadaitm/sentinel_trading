@@ -225,8 +225,13 @@ class SentinelEngine:
     def _close_all(self, reason):
         total_profit = 0.0
         for p in self.b.positions():
-            total_profit += p.profit + p.swap
+            leg_pl = p.profit + p.swap
+            total_profit += leg_pl
             self.b.close_position(p, f"Close: {reason}")
+            # Traza por-leg con ticket (verbose): permite reconstruir el cierre de
+            # cesta pos-a-pos en bot_logs sin depender del reporte de MT5.
+            self.log.write("CIERRE", f"Leg cerrado ({reason}). PnL: {leg_pl:.2f}",
+                           p.price_current, p.volume, self.b.account_balance(), ticket=p.ticket)
         self.log.write("EXITO", f"Cierre CICLO ({reason}). PnL: {total_profit:.2f}",
                        balance=self.b.account_balance())
         self.last_recovery_close_time = self.now
@@ -474,7 +479,7 @@ class SentinelEngine:
                 frac = lots_to_close / worst.volume
                 self.cycle_realized += worst_money * frac
                 self.log.write("HEALER", f"Amputacion Tactica. Lotes: {lots_to_close:.2f}",
-                               worst_money, budget, self.b.account_balance())
+                               worst_money, budget, self.b.account_balance(), ticket=worst.ticket)
 
     # ==============================================================
     # SMART GRINDER
@@ -491,10 +496,11 @@ class SentinelEngine:
             if self._is_grinder(p):
                 grinder_ops += 1
                 if self.now - p.time > time_stop and p.profit <= 0:
+                    tkt = p.ticket
                     self.b.close_position(p, "Grinder TimeStop")
                     self.cycle_realized += p.profit + p.swap  # B: realizado del ciclo (incl. swap)
                     self.log.write("GRINDER", "TimeStop Activado. Limpiando zona.", p.profit,
-                                   balance=self.b.account_balance())
+                                   balance=self.b.account_balance(), ticket=tkt)
                     return
         if grinder_ops >= 1:
             return  # Solo 1 Grinder a la vez
@@ -615,10 +621,11 @@ class SentinelEngine:
                 best_pos = p
 
         if best_pos is not None:
+            banked_ticket = best_pos.ticket
             self.b.close_position(best_pos, "Unwind Profit Banking")
             self.cycle_realized += best_pos.profit + best_pos.swap  # B: acumula lo realizado del ciclo
             self.log.write("UNWIND", f"Profit Banking. Money: {best_money:.2f}",
-                           balance=self.b.account_balance())
+                           balance=self.b.account_balance(), ticket=banked_ticket)
 
     # ==============================================================
     # SENTINEL OP4 (Rescate)

@@ -1,6 +1,6 @@
 """Logger equivalente a WriteLog del MQL5: consola + CSV.
 
-CSV: time, type, message, price, lots, balance  (separador coma).
+CSV: time, type, message, price, lots, balance, ticket  (separador coma).
 Archivo: <log_file_name>_<symbol>.csv (modo append).
 """
 
@@ -14,7 +14,7 @@ class Logger:
                  console_print=True):
         self.enable_file = enable_file
         self.console_print = console_print  # False cuando corre dentro de la TUI
-        # Lista de callbacks: sink(log_type, message, ts, price, lots, balance).
+        # Lista de callbacks: sink(log_type, message, ts, price, lots, balance, ticket).
         # Multiples sinks pueden coexistir (p.ej. DB + buffer de la TUI).
         self.sinks = []
         self.path = None
@@ -24,7 +24,7 @@ class Logger:
             if not os.path.exists(self.path):
                 with open(self.path, "w", newline="", encoding="ansi", errors="replace") as f:
                     csv.writer(f).writerow(
-                        ["time", "type", "message", "price", "lots", "balance"]
+                        ["time", "type", "message", "price", "lots", "balance", "ticket"]
                     )
 
     def add_sink(self, fn):
@@ -32,20 +32,22 @@ class Logger:
         if fn is not None:
             self.sinks.append(fn)
 
-    def write(self, log_type, message, price=0.0, lots=0.0, balance=0.0):
+    def write(self, log_type, message, price=0.0, lots=0.0, balance=0.0, ticket=0):
         ts = datetime.datetime.now().strftime("%Y.%m.%d %H:%M:%S")
         if self.console_print:
-            print(f"[{log_type}] {message} | Price: {price:.2f} | Vol: {lots:.2f} | Bal: {balance:.2f}")
+            print(f"[{log_type}] {message} | Price: {price:.2f} | Vol: {lots:.2f} "
+                  f"| Bal: {balance:.2f} | Tkt: {ticket}")
         for sink in self.sinks:
             try:
-                sink(log_type, message, ts, price, lots, balance)
+                sink(log_type, message, ts, price, lots, balance, ticket)
             except Exception:  # noqa: BLE001  (UI no debe tumbar el trading)
                 pass
         if self.enable_file and self.path:
             try:
                 with open(self.path, "a", newline="", encoding="ansi", errors="replace") as f:
                     csv.writer(f).writerow(
-                        [ts, log_type, message, f"{price:.2f}", f"{lots:.2f}", f"{balance:.2f}"]
+                        [ts, log_type, message, f"{price:.2f}", f"{lots:.2f}",
+                         f"{balance:.2f}", ticket]
                     )
             except OSError as e:
                 # No imprimir a consola: bajo QuickEdit un print desde el hilo
@@ -53,6 +55,6 @@ class Logger:
                 for sink in self.sinks:
                     try:
                         sink("ERROR", f"No se pudo escribir CSV: {e}",
-                             ts, price, lots, balance)
+                             ts, price, lots, balance, 0)
                     except Exception:  # noqa: BLE001
                         pass

@@ -44,6 +44,8 @@ LOG_COLORS = {
     "SYSTEM": "cyan", "ERROR": "bold red", "EXITO": "bold green",
     "OPERACION": "green", "HEALER": "magenta", "UNWIND": "yellow",
     "GRINDER": "blue", "SHADOW": "dim", "PROTECCION": "yellow",
+    "ENTRADA": "bold green", "RECOVERY": "green", "RESCATE": "bold yellow",
+    "CIERRE": "green", "VCB": "bold red",
 }
 
 PARAM_SKIP = {"id", "user_id", "updated_at"}
@@ -56,7 +58,9 @@ class LogBuffer:
         self._dq = deque(maxlen=maxlen)
         self._lock = threading.Lock()
 
-    def add(self, log_type, message, ts, price, lots, balance):
+    def add(self, log_type, message, ts, price, lots, balance, ticket=0):
+        if ticket:
+            message = f"{message} #{ticket}"
         with self._lock:
             self._dq.append((ts, log_type, message))
 

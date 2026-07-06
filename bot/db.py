@@ -51,7 +51,7 @@ class Database:
                 (new_status, config.USER_ID, config.SYMBOL),
             )
 
-    def insert_log(self, log_type, message, ts, price=0.0, lots=0.0, balance=0.0):
+    def insert_log(self, log_type, message, ts, price=0.0, lots=0.0, balance=0.0, ticket=0):
         """Inserta una fila en bot_logs. Usado como Logger.sink; nunca lanza excepcion."""
         if self.conn is None:
             return
@@ -59,10 +59,11 @@ class Database:
             with self.conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO bot_logs (log_type, message, price, lots, balance, symbol, user_id)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s::uuid);
+                    INSERT INTO bot_logs (log_type, message, price, lots, balance, ticket, symbol, user_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s::uuid);
                     """,
-                    (log_type, message, price, lots, balance, config.SYMBOL, config.USER_ID),
+                    (log_type, message, price, lots, balance, int(ticket or 0),
+                     config.SYMBOL, config.USER_ID),
                 )
         except Exception:  # noqa: BLE001  (el log no debe tumbar el trading)
             pass
