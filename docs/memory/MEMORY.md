@@ -5,3 +5,4 @@
 - [Healer comment en deal de cierre](healer-comment-on-close-deal.md) — "Healer Amputacion" vive en el deal OUT, nunca en una op abierta (55/55 son out)
 - [Cascade Healer+Unwind → stop-out](healer-unwind-hedge-cascade.md) — causa raíz de los 2 blowups: al abrir OP3, Healer+Unwind desarman el hedge y dejan la cesta desnuda (-20k en stop-outs)
 - [Presupuesto Healer acumulado](healer-budget-accumulates-across-cycles.md) — cursor congelado en core<3 acumula verdes cross-ciclo; por eso amputa OP1 en rojo tras rachas ganadoras
+- [Logging: taxonomía y ticket](logging-taxonomy-and-ticket.md) — log_types de bot_logs, columna ticket, aperturas en broker vs cierres en strategy; drift ts/created_at
