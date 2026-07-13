@@ -470,13 +470,14 @@ class SentinelEngine:
             lots_to_close = worst.volume  # no cerrar mas de lo abierto
 
         if lots_to_close >= min_lot:
+            vol_before = worst.volume  # captura antes: close_partial puede dejar worst.volume=0
             res = self.b.close_partial(worst, lots_to_close, "Healer Amputacion")
             if res is None or getattr(res, "retcode", None) == mt5.TRADE_RETCODE_DONE:
                 # B: registra la perdida realizada (incl. swap, prorrateada por el
                 # volumen cerrado) en el acumulado del ciclo, para que el freeze del
                 # Unwind la tenga en cuenta y la amputacion NO levante el neto flotante
                 # abriendo la cobertura (cascade). Ver docs/memory: healer-unwind-hedge-cascade.
-                frac = lots_to_close / worst.volume
+                frac = lots_to_close / vol_before
                 self.cycle_realized += worst_money * frac
                 self.log.write("HEALER", f"Amputacion Tactica. Lotes: {lots_to_close:.2f}",
                                worst_money, budget, self.b.account_balance(), ticket=worst.ticket)
