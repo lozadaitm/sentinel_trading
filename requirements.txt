@@ -1,5 +1,6 @@
 MetaTrader5
-psycopg2-binary
+supabase              # cliente cloud (REST/PostgREST) del runtime del bot
+psycopg2-binary       # solo scripts de migracion desde el Postgres local (legacy)
 pandas
 numpy
 rich

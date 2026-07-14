@@ -26,7 +26,15 @@ def _load_dotenv():
 _load_dotenv()
 
 # ==================================================================
-# CONEXION POSTGRESQL (nativo en Windows) - secretos via entorno/.env
+# CONEXION SUPABASE (cloud) - secretos via entorno/.env por instancia.
+# El bot usa la service-role key (bypassa RLS); filtra por USER_ID.
+# ==================================================================
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+
+# ==================================================================
+# CONEXION POSTGRESQL LOCAL (legacy) - solo scripts de migracion.
+# El runtime del bot ya no lo usa; se conserva para migrar datos.
 # ==================================================================
 DB_HOST = os.environ.get("DB_HOST", "localhost")
 DB_NAME = os.environ.get("DB_NAME", "sentinel_local")
@@ -35,14 +43,24 @@ DB_PASS = os.environ.get("DB_PASS", "")  # <-- definir en .env (no se commitea)
 DB_PORT = os.environ.get("DB_PORT", "5432")
 
 # ==================================================================
-# MERCADO / IDENTIDAD
+# MERCADO / IDENTIDAD  (por-instancia via entorno; default = admin legacy)
 # ==================================================================
-SYMBOL = "XAUUSD+"   # <-- si tu broker usa sufijo distinto (XAUUSD.v), cambialo
-MAGIC_NUMBER = 100100
+SYMBOL = os.environ.get("SYMBOL", "XAUUSD+")   # sufijo del broker (XAUUSD.v, etc.)
+MAGIC_NUMBER = int(os.environ.get("MAGIC_NUMBER", "100100"))
 ADMIN_USER_UUID = "81118671-d5ba-4d49-9fb3-4499b54a3d93"
 
-# Usuario/simbolo que identifican la fila de bot_config a cargar
-USER_ID = ADMIN_USER_UUID
+# Usuario que identifica la fila de bot_config/bot_instances a cargar.
+# = auth.users.id en Supabase. Se pasa por .env de la instancia.
+USER_ID = os.environ.get("USER_ID", ADMIN_USER_UUID)
+
+# ==================================================================
+# ATTACH A METATRADER 5  (por-instancia; vacio = terminal por defecto)
+# Permite que cada proceso ataque el terminal/cuenta Vantage correcta.
+# ==================================================================
+MT5_PATH = os.environ.get("MT5_PATH", "")       # ruta al terminal64.exe de esa instancia
+MT5_LOGIN = os.environ.get("MT5_LOGIN", "")     # login numerico de la cuenta
+MT5_SERVER = os.environ.get("MT5_SERVER", "")   # servidor del broker
+MT5_PASSWORD = os.environ.get("MT5_PASSWORD", "")
 
 TIMEFRAME_CORE = mt5.TIMEFRAME_M15
 TIMEFRAME_GRINDER = mt5.TIMEFRAME_M5
@@ -50,6 +68,14 @@ TIMEFRAME_STRUCT = mt5.TIMEFRAME_H4
 
 # Frecuencia del bucle principal (segundos). 1 = comportamiento tipo OnTick.
 LOOP_SLEEP = 1
+
+# Cada cuantos segundos releer config + instancia (bot_config/bot_instances)
+# desde Supabase. Desacopla el control de la frecuencia del on_tick para no
+# pegarle a la REST API cada segundo.
+CONTROL_REFRESH = 3
+
+# Cada cuantos segundos escribir heartbeat + bot_status en bot_instances.
+HEARTBEAT_INTERVAL = 15
 
 # Modo sombra: si True, on_tick loguea decisiones pero NO envia ordenes.
 SHADOW_MODE = False

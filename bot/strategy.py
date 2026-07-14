@@ -79,6 +79,7 @@ class SentinelEngine:
         self.max_cycle_peak = 0.0
         self.cycle_armed = False      # trailing de cesta armado (OP8/OP9)
         self.spread_high = False      # cache del filtro de spread del tick actual
+        self.close_only = False       # modo wind-down: bloquea aperturas, deja gestion/cierres (bot_instances.is_active=false)
         self.last_rescue_time = 0     # cooldown de rescate (OP4)
         self.last_grinder_open = 0    # cooldown de apertura de grinder (OP11)
         self.vol_breaker = False      # VCB activo este tick (Fork A)
@@ -507,8 +508,8 @@ class SentinelEngine:
             return  # Solo 1 Grinder a la vez
 
         # --- Gates de apertura (OP11) ---
-        if self.spread_high or self.vol_breaker:
-            return  # no scalpear con spread alto ni en vela anomala (VCB)
+        if self.spread_high or self.vol_breaker or self.close_only:
+            return  # no scalpear con spread alto, vela anomala (VCB) ni en close-only
         if self.now - self.last_grinder_open < int(self._p("grinder_cooldown")):
             return  # anti-churn: respeta cooldown tras el ultimo grinder
         if (self.atr0 / self.b.point()) < int(self._p("grinder_min_atr_points")):
@@ -634,8 +635,8 @@ class SentinelEngine:
     def _check_rescue(self):
         if not self._p("use_rescue_mode"):
             return
-        if self.spread_high or self.vol_breaker:
-            return  # no abrir martingala con spread alto ni en vela anomala (VCB)
+        if self.spread_high or self.vol_breaker or self.close_only:
+            return  # no abrir martingala con spread alto, vela anomala (VCB) ni en close-only
         # Op3 / cesta = solo posiciones core (RF-I: excluye scalps del grinder)
         positions = [p for p in self.b.positions() if not self._is_grinder(p)]
         if len(positions) < 3:
@@ -879,7 +880,7 @@ class SentinelEngine:
 
         # --- ESTADO 0: ENTRY ---
         if core_count == 0:
-            if self.spread_high or self.vol_breaker:
+            if self.spread_high or self.vol_breaker or self.close_only:
                 return
             if is_friday_mode or is_weekly_start_wait:
                 return
@@ -932,7 +933,7 @@ class SentinelEngine:
 
         # --- ESTADO 2: RECOVERY ---
         elif core_count == 2:
-            if self.spread_high or self.vol_breaker:
+            if self.spread_high or self.vol_breaker or self.close_only:
                 return
             # Anti-espera v2 (OP3): tiempo minimo Y separacion por ATR del ultimo
             # leg. Antes era solo un timer fijo de 60s; ahora ademas exige que el

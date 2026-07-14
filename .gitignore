@@ -1,11 +1,15 @@
 # Secretos / entorno
 .env
 
+# .env por instancia (credenciales Supabase + MT5 por usuario). NO se commitean.
+instances/*.env
+!instances/example.env
+
 # Intento previo (contiene credenciales y logica vieja)
 TRADING PYTHON.txt
 
 # Logs del bot
-*.csv
+#*.csv
 
 # Python
 __pycache__/
