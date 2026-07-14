@@ -80,6 +80,7 @@ class SentinelEngine:
         self.cycle_armed = False      # trailing de cesta armado (OP8/OP9)
         self.spread_high = False      # cache del filtro de spread del tick actual
         self.close_only = False       # modo wind-down: bloquea aperturas, deja gestion/cierres (bot_instances.is_active=false)
+        self.is_active = False         # espejo de bot_instances.is_active (Supabase) para la UI; lo setea main.trading_loop
         self.last_rescue_time = 0     # cooldown de rescate (OP4)
         self.last_grinder_open = 0    # cooldown de apertura de grinder (OP11)
         self.vol_breaker = False      # VCB activo este tick (Fork A)

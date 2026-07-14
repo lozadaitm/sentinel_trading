@@ -129,7 +129,8 @@ def trading_loop(db, engine, logger, stop_event=None):
             if now - last_refresh >= config.CONTROL_REFRESH:
                 cfg, _ = db.load_config()
                 inst = db.get_instance()
-                engine.close_only = not bool(inst.get("is_active", False))
+                engine.is_active = bool(inst.get("is_active", False))
+                engine.close_only = not engine.is_active
                 engine.cfg = cfg
                 last_refresh = now
 

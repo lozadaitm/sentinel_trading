@@ -111,10 +111,25 @@ def render_chart(df, symbol, width, height):
     return Text.from_ansi(plt.build())
 
 
-def render_hud(hud):
+def render_active_badge(is_active, positions=None):
+    """Indicador del interruptor maestro (bot_instances.is_active en Supabase).
+
+    ON  = operando (abre + gestiona).
+    OFF = close-only: no abre; sigue cerrando lo abierto (o apagado si ya no hay).
+    """
+    if is_active:
+        return Text("  is_active: ON  —  OPERANDO  ", style="bold white on green")
+    if positions and positions > 0:
+        return Text("  is_active: OFF  —  CLOSE-ONLY (cerrando abiertas)  ",
+                    style="bold black on yellow")
+    return Text("  is_active: OFF  —  APAGADO  ", style="bold white on red")
+
+
+def render_hud(hud, is_active=False):
     if not hud or hud.get("status"):
         msg = (hud or {}).get("status") or "Iniciando motor..."
-        return Panel(Align.center(Text(msg, style="yellow")),
+        badge = render_active_badge(is_active, (hud or {}).get("positions"))
+        return Panel(Group(Align.center(badge), Align.center(Text(msg, style="yellow"))),
                      title="HUD ENTRADA OP1", border_style="yellow")
 
     ready = hud["ready"]
@@ -131,6 +146,7 @@ def render_hud(hud):
     head = Table.grid(expand=True)
     head.add_column(justify="left")
     head.add_column(justify="right")
+    head.add_row(render_active_badge(is_active, hud["positions"]), Text(""))
     head.add_row(
         Text.assemble(
             ("Lado ", "dim"), (f"{hud['side']}   ", "bold"),
@@ -216,13 +232,13 @@ def render_params(cfg):
 
 def build_layout(layout, engine, log_buf, show_params, size, log_scroll=0):
     width, height = size.width, size.height
-    avail = max(height - 14, 12)        # 14 filas reservadas al HUD
+    avail = max(height - 15, 12)        # 15 filas reservadas al HUD (incluye badge is_active)
     top_h = int(avail * 0.72)
     log_h = max(avail - top_h, 4)
 
     layout.split_column(
         Layout(name="top", ratio=72),
-        Layout(name="hud", size=14),
+        Layout(name="hud", size=15),
         Layout(name="log", ratio=28),
     )
 
@@ -240,7 +256,7 @@ def build_layout(layout, engine, log_buf, show_params, size, log_scroll=0):
                                    title=f"{symbol}  M15", border_style="cyan",
                                    subtitle=Text(HELP_HINT, style="dim")))
 
-    layout["hud"].update(render_hud(engine.hud))
+    layout["hud"].update(render_hud(engine.hud, getattr(engine, "is_active", False)))
     log_panel, log_scroll = render_log(log_buf, log_h - 2, log_scroll)
     layout["log"].update(log_panel)
     return log_scroll
