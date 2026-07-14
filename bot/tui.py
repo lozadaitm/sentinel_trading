@@ -62,7 +62,7 @@ class LogBuffer:
         self._added = 0  # total de eventos recibidos (monotonico, ignora el drop del ring)
 
     def add(self, log_type, message, ts, price, lots, balance, ticket=0):
-        if ticket:
+        if ticket and f"#{ticket}" not in message:
             message = f"{message} #{ticket}"
         with self._lock:
             self._dq.append((ts, log_type, message))

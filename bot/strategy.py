@@ -472,6 +472,12 @@ class SentinelEngine:
 
         if lots_to_close >= min_lot:
             vol_before = worst.volume  # captura antes: close_partial puede dejar worst.volume=0
+            # Identidad de la operacion amputada, capturada ANTES del cierre para
+            # dejar constancia en el log de a que leg se le aplico la amputacion.
+            op_side = "BUY" if worst.type == mt5.POSITION_TYPE_BUY else "SELL"
+            op_desc = worst.comment or "sin comentario"
+            op_ticket = worst.ticket
+            op_open = worst.price_open
             res = self.b.close_partial(worst, lots_to_close, "Healer Amputacion")
             if res is None or getattr(res, "retcode", None) == mt5.TRADE_RETCODE_DONE:
                 # B: registra la perdida realizada (incl. swap, prorrateada por el
@@ -480,8 +486,11 @@ class SentinelEngine:
                 # abriendo la cobertura (cascade). Ver docs/memory: healer-unwind-hedge-cascade.
                 frac = lots_to_close / vol_before
                 self.cycle_realized += worst_money * frac
-                self.log.write("HEALER", f"Amputacion Tactica. Lotes: {lots_to_close:.2f}",
-                               worst_money, budget, self.b.account_balance(), ticket=worst.ticket)
+                self.log.write(
+                    "HEALER",
+                    f"Amputacion Tactica sobre {op_side} '{op_desc}' (ticket #{op_ticket}) "
+                    f"abierta @ {op_open:.2f}. Lotes amputados: {lots_to_close:.2f}",
+                    worst_money, budget, self.b.account_balance(), ticket=op_ticket)
 
     # ==============================================================
     # SMART GRINDER
