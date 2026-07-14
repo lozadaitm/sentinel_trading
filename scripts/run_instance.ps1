@@ -8,10 +8,14 @@
 
 .EXAMPLE
     scripts\run_instance.ps1 instances\usuarioA.env
+    scripts\run_instance.ps1 instances\usuarioA.env -Module bot.tui
 #>
 param(
     [Parameter(Mandatory = $true)]
-    [string]$EnvFile
+    [string]$EnvFile,
+
+    # Modulo a ejecutar: bot.main (consola, default) o bot.tui (UI en vivo).
+    [string]$Module = "bot.main"
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,9 +35,9 @@ Get-Content $EnvFile | ForEach-Object {
     Set-Item -Path "Env:$key" -Value $val
 }
 
-Write-Host "Arrancando instancia: USER_ID=$env:USER_ID SYMBOL=$env:SYMBOL" -ForegroundColor Cyan
+Write-Host "Arrancando instancia: USER_ID=$env:USER_ID SYMBOL=$env:SYMBOL (modulo: $Module)" -ForegroundColor Cyan
 
 # Correr desde la raiz del proyecto (padre de scripts/).
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $projectRoot
-python -m bot.main
+python -m $Module
