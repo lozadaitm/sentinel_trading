@@ -130,6 +130,54 @@ class Database:
             pass
 
     # ==============================================================
+    # Snapshot en vivo para el dashboard (bot_state)
+    # ==============================================================
+    def get_state_initial_balance(self):
+        """initial_balance ya persistido en bot_state, o None si no hay fila aun.
+
+        Se lee una vez al arrancar para no resetear el saldo inicial en cada
+        restart del proceso (ver bot/main.py::setup).
+        """
+        if self.client is None:
+            return None
+        try:
+            res = (
+                self.client.table("bot_state")
+                .select("initial_balance")
+                .eq("user_id", config.USER_ID)
+                .limit(1)
+                .execute()
+            )
+            rows = res.data or []
+            if rows and rows[0].get("initial_balance") is not None:
+                return float(rows[0]["initial_balance"])
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    def report_state(self, *, symbol, balance, equity, margin_used, margin_free,
+                      floating_pnl, open_positions, initial_balance):
+        """Upsert del snapshot en vivo (bot_state) para el dashboard. Best-effort."""
+        if self.client is None:
+            return
+        row = {
+            "user_id": config.USER_ID,
+            "symbol": symbol,
+            "balance": float(balance),
+            "equity": float(equity),
+            "margin_used": float(margin_used),
+            "margin_free": float(margin_free),
+            "floating_pnl": float(floating_pnl),
+            "open_positions": int(open_positions),
+            "initial_balance": float(initial_balance),
+            "updated_at": _utcnow_iso(),
+        }
+        try:
+            self.client.table("bot_state").upsert(row, on_conflict="user_id").execute()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ==============================================================
     # Logging (sink no bloqueante + flusher por lotes)
     # ==============================================================
     def log_sink(self, log_type, message, ts, price=0.0, lots=0.0, balance=0.0, ticket=0):

@@ -156,6 +156,26 @@ CREATE INDEX IF NOT EXISTS idx_bot_logs_user_symbol_ts
     ON public.bot_logs (user_id, symbol, created_at DESC);
 
 -- ==================================================================
+-- bot_state  |  Snapshot en vivo (1 fila por usuario) para el dashboard.
+--   Lo escribe el BOT en cada heartbeat (upsert, service-role).
+--   balance/equity/margin_* vienen de mt5.account_info(); open_positions
+--   de broker.positions(); initial_balance se fija una sola vez al arrancar
+--   (se reusa entre restarts). Ver bot/db.py::report_state.
+-- ==================================================================
+CREATE TABLE IF NOT EXISTS public.bot_state (
+    user_id         UUID        PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    symbol          TEXT,
+    balance         DOUBLE PRECISION,
+    equity          DOUBLE PRECISION,
+    margin_used     DOUBLE PRECISION,
+    margin_free     DOUBLE PRECISION,
+    floating_pnl    DOUBLE PRECISION,
+    open_positions  INTEGER,
+    initial_balance DOUBLE PRECISION,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ==================================================================
 -- Row Level Security. El service-role bypassa TODO esto automaticamente;
 -- estas politicas aplican al frontend (rol authenticated con su JWT).
 -- ==================================================================
@@ -180,6 +200,13 @@ CREATE POLICY bot_config_owner ON public.bot_config
 -- bot_logs: el usuario solo LEE sus logs (el INSERT lo hace el bot con service-role).
 DROP POLICY IF EXISTS bot_logs_owner_select ON public.bot_logs;
 CREATE POLICY bot_logs_owner_select ON public.bot_logs
+    FOR SELECT TO authenticated
+    USING (user_id = auth.uid());
+
+-- bot_state: el usuario solo LEE su snapshot (el UPSERT lo hace el bot con service-role).
+ALTER TABLE public.bot_state ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS bot_state_owner_select ON public.bot_state;
+CREATE POLICY bot_state_owner_select ON public.bot_state
     FOR SELECT TO authenticated
     USING (user_id = auth.uid());
 

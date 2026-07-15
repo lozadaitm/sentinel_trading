@@ -71,3 +71,30 @@ ALTER TABLE public.bot_config
 -- ------------------------------------------------------------------
 ALTER TABLE public.bot_logs
     ADD COLUMN IF NOT EXISTS ticket BIGINT DEFAULT 0;
+
+-- ------------------------------------------------------------------
+-- 2026-07-15 | bot_state: snapshot en vivo (1 fila por usuario) para el
+--   dashboard web. El bot lo upsertea en cada heartbeat (balance, equity,
+--   margen usado/libre, PnL flotante, posiciones abiertas, saldo inicial).
+--   RLS: el usuario solo LEE su fila; el UPSERT lo hace el bot (service-role).
+--   Ver bot/db.py::report_state / get_state_initial_balance, bot/main.py.
+-- ------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.bot_state (
+    user_id         UUID        PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    symbol          TEXT,
+    balance         DOUBLE PRECISION,
+    equity          DOUBLE PRECISION,
+    margin_used     DOUBLE PRECISION,
+    margin_free     DOUBLE PRECISION,
+    floating_pnl    DOUBLE PRECISION,
+    open_positions  INTEGER,
+    initial_balance DOUBLE PRECISION,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE public.bot_state ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS bot_state_owner_select ON public.bot_state;
+CREATE POLICY bot_state_owner_select ON public.bot_state
+    FOR SELECT TO authenticated
+    USING (user_id = auth.uid());

@@ -87,6 +87,12 @@ def setup(logger=None):
     engine.init_history_cursor()
     engine.user_email = db.get_user_email()  # una vez al arrancar (para identificar la instancia)
 
+    # Saldo inicial para el dashboard (bot_state): reusa el ya persistido si
+    # existe (sobrevive a restarts), si no lo fija al balance actual.
+    engine.initial_balance = db.get_state_initial_balance()
+    if engine.initial_balance is None:
+        engine.initial_balance = broker.account_balance()
+
     who = engine.user_email or config.USER_ID
     logger.write("SYSTEM", f"HYPER GRINDER v20.0 (Python) INICIADO. user={who} symbol={config.SYMBOL}",
                  balance=broker.account_balance())
@@ -150,6 +156,25 @@ def trading_loop(db, engine, logger, stop_event=None):
                 if status != last_reported:
                     logger.write("SYSTEM", f"Estado del bot: {status}.")
                     last_reported = status
+
+                # Snapshot en vivo para el dashboard (bot_state). Best-effort;
+                # nunca debe tumbar el bucle si Supabase/MT5 fallan.
+                try:
+                    info = mt5.account_info()
+                    if info:
+                        db.report_state(
+                            symbol=config.SYMBOL,
+                            balance=info.balance,
+                            equity=info.equity,
+                            margin_used=info.margin,
+                            margin_free=info.margin_free,
+                            floating_pnl=info.equity - info.balance,
+                            open_positions=len(engine.b.positions()),
+                            initial_balance=engine.initial_balance,
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
+
                 last_report = now
 
             time.sleep(config.LOOP_SLEEP)
