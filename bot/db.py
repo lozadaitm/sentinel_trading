@@ -178,6 +178,47 @@ class Database:
             pass
 
     # ==============================================================
+    # Posiciones (bot_positions): tabla principal de posiciones para el
+    # dashboard. Vivas se refrescan en cada heartbeat; al cerrarse quedan
+    # como historico (status=CLOSED).
+    # ==============================================================
+    def get_open_tickets(self):
+        """Tickets marcados status='OPEN' en bot_positions (para reconciliar
+        al arrancar, ver bot/main.py::setup). Set vacio ante fallo/sin datos.
+        """
+        if self.client is None:
+            return set()
+        try:
+            res = (
+                self.client.table("bot_positions")
+                .select("ticket")
+                .eq("user_id", config.USER_ID)
+                .eq("status", "OPEN")
+                .execute()
+            )
+            return {row["ticket"] for row in (res.data or [])}
+        except Exception:  # noqa: BLE001
+            return set()
+
+    def upsert_positions(self, rows):
+        """Upsert en bot_positions (posiciones abiertas y/o cierres). Best-effort.
+
+        Cada row debe traer al menos user_id/ticket; columnas ausentes NO se
+        tocan en un UPDATE por conflicto (permite cerrar una posicion mandando
+        solo status/close_price/... sin repetir los datos de apertura).
+        """
+        if self.client is None or not rows:
+            return
+        now_iso = _utcnow_iso()
+        for row in rows:
+            row.setdefault("user_id", config.USER_ID)
+            row["updated_at"] = now_iso
+        try:
+            self.client.table("bot_positions").upsert(rows, on_conflict="user_id,ticket").execute()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ==============================================================
     # Logging (sink no bloqueante + flusher por lotes)
     # ==============================================================
     def log_sink(self, log_type, message, ts, price=0.0, lots=0.0, balance=0.0, ticket=0):

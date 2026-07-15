@@ -176,6 +176,43 @@ CREATE TABLE IF NOT EXISTS public.bot_state (
 );
 
 -- ==================================================================
+-- bot_positions  |  Tabla principal de posiciones (historico + vivo).
+--   El bot upsertea cada abierta en cada heartbeat (status=OPEN, precio y
+--   P&L flotante frescos); al desaparecer de MT5 se marca CLOSED con el
+--   cierre reconstruido del historial de deals (precio, hora, P&L total
+--   incl. cierres parciales del Healer/Unwind). Solo user_id/ticket/status
+--   son NOT NULL: un cierre puede upsertear sin repetir los datos de
+--   apertura. Ver bot/db.py::upsert_positions, bot/main.py.
+-- ==================================================================
+CREATE TABLE IF NOT EXISTS public.bot_positions (
+    id             BIGSERIAL   PRIMARY KEY,
+    user_id        UUID        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    ticket         BIGINT      NOT NULL,
+    symbol         TEXT,
+    position_type  TEXT,                    -- BUY | SELL
+    op_type        TEXT,                    -- ENTRADA | PROTECCION | RECOVERY | RESCATE | GRINDER | OPERACION
+    comment        TEXT,                    -- comment original de MT5 (p.ej. "SMC Buy Entry")
+    lots           DOUBLE PRECISION,
+    open_price     DOUBLE PRECISION,
+    open_time      TIMESTAMPTZ,
+    sl             DOUBLE PRECISION,
+    tp             DOUBLE PRECISION,
+    current_price  DOUBLE PRECISION,        -- solo vivo (mientras status=OPEN)
+    profit         DOUBLE PRECISION,        -- flotante si OPEN, total realizado si CLOSED
+    swap           DOUBLE PRECISION,
+    status         TEXT        NOT NULL DEFAULT 'OPEN',  -- OPEN | CLOSED
+    close_price    DOUBLE PRECISION,
+    close_time     TIMESTAMPTZ,
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (user_id, ticket)
+);
+
+CREATE INDEX IF NOT EXISTS idx_bot_positions_user_status
+    ON public.bot_positions (user_id, status);
+CREATE INDEX IF NOT EXISTS idx_bot_positions_user_open_time
+    ON public.bot_positions (user_id, open_time DESC);
+
+-- ==================================================================
 -- Row Level Security. El service-role bypassa TODO esto automaticamente;
 -- estas politicas aplican al frontend (rol authenticated con su JWT).
 -- ==================================================================
@@ -207,6 +244,13 @@ CREATE POLICY bot_logs_owner_select ON public.bot_logs
 ALTER TABLE public.bot_state ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS bot_state_owner_select ON public.bot_state;
 CREATE POLICY bot_state_owner_select ON public.bot_state
+    FOR SELECT TO authenticated
+    USING (user_id = auth.uid());
+
+-- bot_positions: el usuario solo LEE sus posiciones (el UPSERT lo hace el bot con service-role).
+ALTER TABLE public.bot_positions ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS bot_positions_owner_select ON public.bot_positions;
+CREATE POLICY bot_positions_owner_select ON public.bot_positions
     FOR SELECT TO authenticated
     USING (user_id = auth.uid());
 

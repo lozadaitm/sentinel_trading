@@ -197,3 +197,13 @@ class Broker:
     def history_deals(self, from_dt, to_dt):
         deals = mt5.history_deals_get(from_dt, to_dt)
         return list(deals) if deals else []
+
+    def history_deals_for_position(self, ticket):
+        """Todos los deals (IN + OUT/OUT_BY) de una posicion por su ticket.
+
+        Permite reconstruir el cierre exacto (precio, hora, P&L total incl.
+        cierres parciales del Healer/Unwind) sin depender de una ventana de
+        tiempo. Ver bot/db.py::upsert_positions (bot_positions).
+        """
+        deals = mt5.history_deals_get(position=ticket)
+        return list(deals) if deals else []

@@ -12,6 +12,7 @@ pueda reutilizar el mismo motor en un hilo aparte sin duplicar logica.
 """
 
 import ctypes
+import datetime
 import os
 import time
 
@@ -93,6 +94,17 @@ def setup(logger=None):
     if engine.initial_balance is None:
         engine.initial_balance = broker.account_balance()
 
+    # Reconciliacion de bot_positions: si alguna quedo marcada OPEN pero ya no
+    # existe en MT5 (se cerro con el bot apagado), se cierra ahora con el
+    # historial de deals. Evita posiciones "fantasma" en el dashboard.
+    try:
+        live_tickets = {p.ticket for p in broker.positions()}
+        stale_tickets = db.get_open_tickets() - live_tickets
+        if stale_tickets:
+            db.upsert_positions([_closed_position_row(broker, t) for t in stale_tickets])
+    except Exception:  # noqa: BLE001
+        pass
+
     who = engine.user_email or config.USER_ID
     logger.write("SYSTEM", f"HYPER GRINDER v20.0 (Python) INICIADO. user={who} symbol={config.SYMBOL}",
                  balance=broker.account_balance())
@@ -113,6 +125,58 @@ def _bot_status(engine):
     return "CLOSE_ONLY" if has_pos else "FLAT"
 
 
+def _epoch_to_iso(epoch):
+    return datetime.datetime.fromtimestamp(epoch, tz=datetime.timezone.utc).isoformat()
+
+
+def _open_position_row(p):
+    """Fila OPEN para bot_positions a partir de una posicion live de MT5."""
+    return {
+        "ticket": p.ticket,
+        "symbol": config.SYMBOL,
+        "position_type": "BUY" if p.type == mt5.POSITION_TYPE_BUY else "SELL",
+        "op_type": Broker._open_log_type(p.comment),
+        "comment": p.comment,
+        "lots": p.volume,
+        "open_price": p.price_open,
+        "open_time": _epoch_to_iso(p.time),
+        "sl": p.sl,
+        "tp": p.tp,
+        "current_price": p.price_current,
+        "profit": p.profit,
+        "swap": p.swap,
+        "status": "OPEN",
+    }
+
+
+def _closed_position_row(broker, ticket):
+    """Fila de cierre para bot_positions, reconstruida del historial de deals
+    de la posicion (P&L total incl. cierres parciales previos del Healer/Unwind).
+
+    Si el historial no trae nada (broker sin retencion, etc.) devuelve solo el
+    cambio de status: el upsert por conflicto no pisa los datos ya guardados.
+    """
+    row = {"ticket": ticket, "status": "CLOSED"}
+    total_profit = 0.0
+    total_swap = 0.0
+    close_price = None
+    last_time = -1
+    for d in broker.history_deals_for_position(ticket):
+        if d.entry == mt5.DEAL_ENTRY_IN:
+            continue
+        total_profit += d.profit
+        total_swap += d.swap
+        if d.time > last_time:
+            last_time = d.time
+            close_price = d.price
+    if close_price is not None:
+        row["close_price"] = close_price
+        row["close_time"] = _epoch_to_iso(last_time)
+        row["profit"] = total_profit
+        row["swap"] = total_swap
+    return row
+
+
 def trading_loop(db, engine, logger, stop_event=None):
     """Bucle principal. Corre hasta stop_event (TUI) o KeyboardInterrupt (consola).
 
@@ -125,6 +189,7 @@ def trading_loop(db, engine, logger, stop_event=None):
     last_refresh = 0.0
     last_report = 0.0
     cfg = {}
+    known_open_tickets = set()  # ultimo set de tickets OPEN reportado a bot_positions
 
     def running():
         return stop_event is None or not stop_event.is_set()
@@ -172,6 +237,20 @@ def trading_loop(db, engine, logger, stop_event=None):
                             open_positions=len(engine.b.positions()),
                             initial_balance=engine.initial_balance,
                         )
+                except Exception:  # noqa: BLE001
+                    pass
+
+                # Posiciones para el dashboard (bot_positions): upsert de las
+                # abiertas + cierre de las que desaparecieron desde el ultimo
+                # heartbeat. Best-effort; nunca debe tumbar el bucle.
+                try:
+                    live_positions = engine.b.positions()
+                    current_tickets = {p.ticket for p in live_positions}
+                    closed_tickets = known_open_tickets - current_tickets
+                    rows = [_open_position_row(p) for p in live_positions]
+                    rows += [_closed_position_row(engine.b, t) for t in closed_tickets]
+                    db.upsert_positions(rows)
+                    known_open_tickets = current_tickets
                 except Exception:  # noqa: BLE001
                     pass
 

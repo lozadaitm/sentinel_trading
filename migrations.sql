@@ -98,3 +98,49 @@ DROP POLICY IF EXISTS bot_state_owner_select ON public.bot_state;
 CREATE POLICY bot_state_owner_select ON public.bot_state
     FOR SELECT TO authenticated
     USING (user_id = auth.uid());
+
+-- ------------------------------------------------------------------
+-- 2026-07-16 | bot_positions: tabla principal de posiciones (historico +
+--   vivo) para el dashboard web. El bot upsertea cada posicion abierta en
+--   cada heartbeat (precio/P&L flotante frescos); al cerrarse la marca
+--   CLOSED con el cierre reconstruido del historial de deals (precio, hora,
+--   P&L total incl. cierres parciales del Healer/Unwind). Solo
+--   user_id/ticket/status son NOT NULL para permitir upserts parciales al
+--   cerrar. RLS: el usuario solo LEE; el UPSERT lo hace el bot (service-role).
+--   Ver bot/db.py::upsert_positions/get_open_tickets, bot/main.py,
+--   bot/broker.py::history_deals_for_position.
+-- ------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.bot_positions (
+    id             BIGSERIAL   PRIMARY KEY,
+    user_id        UUID        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    ticket         BIGINT      NOT NULL,
+    symbol         TEXT,
+    position_type  TEXT,
+    op_type        TEXT,
+    comment        TEXT,
+    lots           DOUBLE PRECISION,
+    open_price     DOUBLE PRECISION,
+    open_time      TIMESTAMPTZ,
+    sl             DOUBLE PRECISION,
+    tp             DOUBLE PRECISION,
+    current_price  DOUBLE PRECISION,
+    profit         DOUBLE PRECISION,
+    swap           DOUBLE PRECISION,
+    status         TEXT        NOT NULL DEFAULT 'OPEN',
+    close_price    DOUBLE PRECISION,
+    close_time     TIMESTAMPTZ,
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (user_id, ticket)
+);
+
+CREATE INDEX IF NOT EXISTS idx_bot_positions_user_status
+    ON public.bot_positions (user_id, status);
+CREATE INDEX IF NOT EXISTS idx_bot_positions_user_open_time
+    ON public.bot_positions (user_id, open_time DESC);
+
+ALTER TABLE public.bot_positions ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS bot_positions_owner_select ON public.bot_positions;
+CREATE POLICY bot_positions_owner_select ON public.bot_positions
+    FOR SELECT TO authenticated
+    USING (user_id = auth.uid());
