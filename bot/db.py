@@ -102,6 +102,21 @@ class Database:
         except Exception:  # noqa: BLE001
             return self._inst_cache or {}
 
+    def get_user_email(self):
+        """Email del usuario (auth.users) via Admin API (service-role). None si falla.
+
+        Se usa para identificar en la UI a que usuario corresponde esta instancia.
+        El email casi no cambia: conviene leerlo una vez al arrancar y cachearlo.
+        """
+        if self.client is None:
+            return None
+        try:
+            resp = self.client.auth.admin.get_user_by_id(config.USER_ID)
+            user = getattr(resp, "user", resp)  # UserResponse.user o el user directo
+            return getattr(user, "email", None)
+        except Exception:  # noqa: BLE001  (no bloquear el arranque por esto)
+            return None
+
     def report(self, bot_status):
         """Escribe bot_status + heartbeat en bot_instances (best-effort)."""
         if self.client is None:

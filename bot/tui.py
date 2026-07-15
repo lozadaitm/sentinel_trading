@@ -125,11 +125,18 @@ def render_active_badge(is_active, positions=None):
     return Text("  is_active: OFF  —  APAGADO  ", style="bold white on red")
 
 
-def render_hud(hud, is_active=False):
+def render_user(user_label):
+    """Identifica a que usuario corresponde esta instancia (email o UUID)."""
+    return Text.assemble(("Usuario ", "dim"), (str(user_label or "?"), "bold cyan"))
+
+
+def render_hud(hud, is_active=False, user_label=""):
     if not hud or hud.get("status"):
         msg = (hud or {}).get("status") or "Iniciando motor..."
         badge = render_active_badge(is_active, (hud or {}).get("positions"))
-        return Panel(Group(Align.center(badge), Align.center(Text(msg, style="yellow"))),
+        return Panel(Group(Align.center(render_user(user_label)),
+                           Align.center(badge),
+                           Align.center(Text(msg, style="yellow"))),
                      title="HUD ENTRADA OP1", border_style="yellow")
 
     ready = hud["ready"]
@@ -146,7 +153,7 @@ def render_hud(hud, is_active=False):
     head = Table.grid(expand=True)
     head.add_column(justify="left")
     head.add_column(justify="right")
-    head.add_row(render_active_badge(is_active, hud["positions"]), Text(""))
+    head.add_row(render_active_badge(is_active, hud["positions"]), render_user(user_label))
     head.add_row(
         Text.assemble(
             ("Lado ", "dim"), (f"{hud['side']}   ", "bold"),
@@ -256,7 +263,8 @@ def build_layout(layout, engine, log_buf, show_params, size, log_scroll=0):
                                    title=f"{symbol}  M15", border_style="cyan",
                                    subtitle=Text(HELP_HINT, style="dim")))
 
-    layout["hud"].update(render_hud(engine.hud, getattr(engine, "is_active", False)))
+    user_label = getattr(engine, "user_email", None) or config.USER_ID
+    layout["hud"].update(render_hud(engine.hud, getattr(engine, "is_active", False), user_label))
     log_panel, log_scroll = render_log(log_buf, log_h - 2, log_scroll)
     layout["log"].update(log_panel)
     return log_scroll

@@ -85,8 +85,10 @@ def setup(logger=None):
     broker = Broker(logger, shadow=config.SHADOW_MODE)
     engine = SentinelEngine(broker, logger)
     engine.init_history_cursor()
+    engine.user_email = db.get_user_email()  # una vez al arrancar (para identificar la instancia)
 
-    logger.write("SYSTEM", f"HYPER GRINDER v20.0 (Python) INICIADO. user={config.USER_ID} symbol={config.SYMBOL}",
+    who = engine.user_email or config.USER_ID
+    logger.write("SYSTEM", f"HYPER GRINDER v20.0 (Python) INICIADO. user={who} symbol={config.SYMBOL}",
                  balance=broker.account_balance())
     if config.SHADOW_MODE:
         logger.write("SYSTEM", "MODO SOMBRA activo: no se enviaran ordenes reales; solo se loguean decisiones.")
