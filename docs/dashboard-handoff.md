@@ -75,11 +75,26 @@ Cuatro tablas en el schema `public`. Todas con FK a `auth.users(id)` y RLS por u
     numérica → parsear es frágil. Para % win/loss y ganancias, **prefiere** el delta de `balance`
     entre eventos o `bot_state` antes que parsear strings.
 
-**`bot_state`** — snapshot en vivo, 1 fila por usuario (**dependencia — ver nota al final**):
+**`bot_state`** — snapshot en vivo, 1 fila por usuario:
 - `balance`, `equity`, `margin_used`, `margin_free`, `floating_pnl` DOUBLE, `open_positions` INT,
   `initial_balance` DOUBLE, `symbol`, `updated_at`. RLS `FOR SELECT` al dueño.
-- Fuente de: saldo actual, equity, **balance en uso (margen)**, **operaciones abiertas en vivo**,
-  ganancias totales (`equity - initial_balance`).
+- Fuente de: saldo actual, equity, **balance en uso (margen)**, contador rápido de operaciones
+  abiertas, ganancias totales (`equity - initial_balance`).
+
+**`bot_positions`** — tabla principal de posiciones (histórico + vivo), ya desplegada:
+- `id` BIGSERIAL PK, `user_id`, `ticket` BIGINT, `symbol`, `position_type` (`BUY`/`SELL`),
+  `op_type` (misma taxonomía de apertura que `bot_logs`: `ENTRADA | PROTECCION | RECOVERY | RESCATE
+  | GRINDER | OPERACION`), `comment` (texto original de MT5), `lots`, `open_price`, `open_time`,
+  `sl`, `tp`, `current_price`, `profit`, `swap`, `status` (`OPEN | CLOSED`), `close_price`,
+  `close_time`, `updated_at`. `UNIQUE(user_id, ticket)`.
+- El bot upsertea cada posición **abierta** en cada heartbeat (precio/P&L flotante frescos). Al
+  cerrarse (el ticket desaparece de MT5) la marca `CLOSED` con el cierre reconstruido del historial
+  de deals de esa posición: `close_price`/`close_time` del deal final y `profit`/`swap` **totales**
+  (incluye cierres parciales previos del Healer/Unwind, no solo el último tramo).
+- RLS: `FOR SELECT` al dueño (el upsert lo hace el bot con service-role).
+- **Esta es ahora la fuente preferida** para operaciones abiertas en detalle, histórico de
+  posiciones y % win/loss — ver mapeo de métricas actualizado abajo. `bot_logs` sigue siendo el
+  feed de eventos (útil para ver HEALER/UNWIND/VCB/SYSTEM/ERROR con contexto), no lo elimines.
 
 **CAVEAT crítico — schema drift de la columna de tiempo.** El SQL declara `created_at`, pero la
 tabla `bot_logs` **viva en producción** usa `ts`. **Antes de ordenar/filtrar por tiempo, verifica
@@ -101,6 +116,12 @@ contra la BD real** cuál existe (introspección o probar `ts` y caer a `created
 6. **Feed de eventos (vivo)**: tabla/stream de `bot_logs` con color por `log_type`, filtros y
    paginación. Suscripción **Realtime** a nuevos INSERT.
 7. **Curva de balance**: serie temporal de `bot_logs.balance` (o `bot_state`).
+8. **Panel de posiciones abiertas (vivo)**: tabla de `bot_positions WHERE status='OPEN'`, una fila
+   por ticket (tipo, lotes, precio apertura, precio actual, P&L flotante, SL/TP, tiempo abierta).
+   Suscripción Realtime (INSERT/UPDATE) para que se actualice sin polling.
+9. **Histórico de posiciones**: tabla de `bot_positions WHERE status='CLOSED'`, paginada,
+   ordenable por `close_time` DESC, filtrable por `op_type`/`position_type`. Reemplaza la necesidad
+   de reconstruir trades parseando `bot_logs.message`.
 
 **Admin (server-side, service-role, allowlist):**
 8. Grilla de **todas** las instancias: usuario/email, `bot_status`, online/offline, `is_active`,
@@ -110,19 +131,23 @@ contra la BD real** cuál existe (introspección o probar `ts` y caer a `created
 - Saldo inicial → `bot_state.initial_balance` (fallback: `balance` más antiguo en `bot_logs`).
 - Saldo actual → `bot_state.balance`; Equity → `bot_state.equity`.
 - Balance en uso → `bot_state.margin_used` (**solo aquí**).
-- Operaciones abiertas live → `bot_state.open_positions` (**solo aquí**).
-- Ganancias totales $ → `bot_state.equity - bot_state.initial_balance`.
-- Operaciones totales → COUNT en `bot_logs` de aperturas (log_type de apertura).
-- % win/loss → eventos de cierre en `bot_logs` (cuenta ganadores vs perdedores; usa delta de
-  `balance` o el agregado `EXITO`, evita parsear `message`).
+- Operaciones abiertas live (contador rápido) → `bot_state.open_positions`; **detalle por posición**
+  → `bot_positions WHERE status='OPEN'`.
+- Ganancias totales $ → `bot_state.equity - bot_state.initial_balance` (fuente primaria; opcional
+  cruzarla con `SUM(profit+swap)` de `bot_positions CLOSED` + `bot_state.floating_pnl`).
+- Operaciones totales → `COUNT(*)` en `bot_positions` (antes se contaban aperturas en `bot_logs`;
+  `bot_positions` es ahora la fuente preferida, 1 fila por ticket real).
+- % win/loss → entre `bot_positions WHERE status='CLOSED'`, ganadoras = `profit + swap > 0` vs
+  perdedoras = `profit + swap <= 0`. Columna numérica directa — **ya no hace falta** parsear
+  `bot_logs.message` para esto.
 
 ### TÉCNICA / BUENAS PRÁCTICAS
 
 - Cliente Supabase del navegador: **solo** `NEXT_PUBLIC_SUPABASE_URL` + `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
 - Service-role key: solo en env server (`SUPABASE_SERVICE_ROLE_KEY`), usada en Server Components /
   Route Handlers para la vista admin. Jamás en `NEXT_PUBLIC_*`.
-- Realtime: habilitar replicación en `bot_instances`, `bot_state`, `bot_logs` (te lo confirma el
-  operador). Suscribir cambios para vivo sin polling.
+- Realtime: habilitar replicación en `bot_instances`, `bot_state`, `bot_logs`, `bot_positions` (te
+  lo confirma el operador). Suscribir cambios para vivo sin polling.
 - Manejo de "sin fila": un usuario nuevo puede no tener aún `bot_state`/`bot_logs`; muestra estados
   vacíos, no errores.
 - Formatea dinero y % con locale es. Zona horaria: muestra en local del navegador; los timestamps
@@ -141,34 +166,12 @@ El bot **no** tiene emergency-stop ni SL catastrófico; OP2 (Hedge Lock) **conge
 Healer hace cierres parciales; `is_active=false` es **close-only**. La UI debe reflejar esta
 semántica, no ofrecer acciones destructivas que el bot no soporta.
 
-### NOTA — dependencia `bot_state`
+### NOTA — `bot_state` y `bot_positions` ya están desplegadas
 
-La tabla `bot_state` puede no existir todavía en la BD cuando empieces. Es un cambio aditivo del
-lado del bot (upsert en cada heartbeat, reusando `db.report()`). Coordínalo con el operador:
-- Si **existe** → consúmela para las métricas live.
-- Si **no existe aún** → construye todo lo demás (auth, status, toggle, config, logs, métricas
-  derivables de `bot_logs`) y deja las tarjetas de "balance en uso" y "posiciones abiertas live"
-  como placeholders claramente marcados hasta que la tabla esté disponible. No bloquees el resto.
-
-Contrato SQL de referencia (lo aplica el operador en el repo del bot, no tú):
-
-```sql
-create table if not exists public.bot_state (
-    user_id         uuid primary key references auth.users(id) on delete cascade,
-    symbol          text,
-    balance         double precision,   -- account_balance (realizado)
-    equity          double precision,   -- account_equity (realizado + flotante)
-    margin_used     double precision,   -- equity - margin_free  (balance en uso)
-    margin_free     double precision,
-    floating_pnl    double precision,
-    open_positions  int,
-    initial_balance double precision,   -- capturado 1 vez al primer connect
-    updated_at      timestamptz not null default now()
-);
-alter table public.bot_state enable row level security;
-create policy bot_state_owner on public.bot_state
-    for select to authenticated using (user_id = auth.uid());
-```
+Ambas tablas existen en la BD de producción (no son placeholders): `bot_state` desde 2026-07-15,
+`bot_positions` desde 2026-07-16. Ambas se alimentan del mismo heartbeat del bot (~15 s). Puedes
+consumirlas directamente sin gate ni fallback — solo confirma con el operador que Realtime está
+habilitado en ellas si lo necesitas para vivo.
 
 ### PRIMEROS PASOS SUGERIDOS
 
@@ -192,11 +195,14 @@ create policy bot_state_owner on public.bot_state
 
 ## Referencias en el repo del bot (para el operador / trazabilidad)
 
-- `supabase_schema.sql` — esquema canónico de `bot_instances`, `bot_config`, `bot_logs` + RLS.
-- `bot/db.py` — capa Supabase (queries; `report()` escribe heartbeat/estado; logging por lotes).
+- `supabase_schema.sql` — esquema canónico de las 5 tablas (`bot_instances`, `bot_config`,
+  `bot_logs`, `bot_state`, `bot_positions`) + RLS.
+- `bot/db.py` — capa Supabase (queries; `report()`/`report_state()`/`upsert_positions()`; logging
+  por lotes).
+- `bot/broker.py` (`history_deals_for_position`) — reconstruye el cierre exacto de una posición.
 - `bot/strategy.py` (`_build_hud`) — de dónde salen los valores del snapshot `bot_state`
   (`balance`, `equity`, `positions`, etc.).
-- `bot/main.py` — heartbeat/control loop; el seam del snapshot está donde se llama `db.report()`.
+- `bot/main.py` — heartbeat/control loop; upserts de `bot_state` y `bot_positions` en cada ciclo.
 - `docs/memory/supabase-multi-instance-model.md` — modelo multi-instancia y semántica de `is_active`.
 - `docs/memory/logging-taxonomy-and-ticket.md` — taxonomía de `log_type` y caveat `ts`/`created_at`.
 - `docs/memory/bot-design-constraints.md` — restricciones de diseño (no stops duros, hedge congela).
