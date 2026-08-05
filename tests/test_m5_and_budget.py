@@ -22,6 +22,13 @@ descubrir en vivo:
           por encima de la entrada. Ademas el VCB sigue bloqueando la entrada en
           velas anomalas y sigue siendo desactivable por config.
 
+  [12]    Guard de identidad: BOT_ID y MAGIC_NUMBER deben corresponderse, o
+          los dos motores se verian las posiciones mutuamente.
+  [13]    Healer: no amputa el leg de cobertura mientras el ciclo va en
+          negativo. Reproduce el escenario real del 17-07 (cesta corta a favor
+          con el Hedge Lock BUY como unico leg contra-direccional, que era el
+          argmin y se comieron a mordiscos).
+
 Uso:  python -m tests.test_m5_and_budget      (desde la raiz del repo)
 """
 import sys
@@ -54,6 +61,7 @@ class FakeBroker:
         self._price, self._balance = price, balance
         self._pos, self._next = [], 1
         self.orders = []
+        self.partials = []
         self.ml = float("inf")
         self._free = 9000.0
     # specs
@@ -93,6 +101,14 @@ class FakeBroker:
         return R()
     def close_position(self, p, comment="Close"):
         self._pos.remove(p)
+        class R: retcode = mt5.TRADE_RETCODE_DONE
+        return R()
+    def close_partial(self, p, lots, comment="Partial"):
+        lots = min(float(lots), p.volume)
+        p.volume = round(p.volume - lots, 8)
+        self.partials.append({"ticket": p.ticket, "lots": lots, "comment": comment})
+        if p.volume <= 1e-9:
+            self._pos.remove(p)
         class R: retcode = mt5.TRADE_RETCODE_DONE
         return R()
     def modify_sl(self, p, sl): p.sl = float(sl); return None
@@ -497,6 +513,71 @@ def run():
     check("BOT_ID desconocido avisa pero no aborta",
           len(reload_config("m30", 100300).validate_identity()) == 1)
     reload_config("m15", 100100)  # restaura el modulo para el resto de la sesion
+
+    # ---------- 13. Healer: no se come la cobertura ----------
+    print("\n[13] Healer - proteccion del leg de cobertura")
+
+    def healer_setup(legs, cycle_realized=0.0):
+        """legs: lista de (tipo, volumen, pnl, comment). Devuelve (broker, engine)."""
+        b = FakeBroker(magic=config.MAGIC_M15)
+        e = m15_engine(b, FakeLogger())
+        e.cfg = {}
+        e.cycle_realized = cycle_realized
+        for i, (t, v, pnl, cm) in enumerate(legs, start=1):
+            p = FakePos(1000 + i, t, v, 4000.0, 0, cm, config.MAGIC_M15)
+            p.profit = pnl
+            b._pos.append(p)
+        return b, e
+
+    # Escenario real del 17-07: cesta corta (Op1 SELL + rescates SELL) con el
+    # precio a favor, y un Hedge Lock BUY como UNICO leg contra-direccional,
+    # profundamente rojo. Era el argmin y por eso se lo comian a mordiscos.
+    BUY, SELL = mt5.POSITION_TYPE_BUY, mt5.POSITION_TYPE_SELL
+    legs_1707 = [
+        (SELL, 0.20, +120.0, "SMC Sell Entry"),
+        (SELL, 0.20, +80.0, "Sentinel Op 4 (L3-CRITICO)"),
+        (SELL, 0.20, +60.0, "Sentinel Op 4 (L3-CRITICO)"),
+        (BUY,  0.20, -1379.58, "Hedge Lock"),      # el que se comieron 12 veces
+    ]
+    b13, e13 = healer_setup(legs_1707)
+    hedge = b13._pos[-1]
+    check("el hedge ES el peor leg (argmin), como en produccion",
+          min(b13._pos, key=lambda p: p.profit + p.swap) is hedge)
+    check("cerrarlo aumentaria la exposicion neta -> es cobertura",
+          e13._closing_increases_exposure(hedge))
+    e13._apply_healing(2000.0)   # presupuesto de sobra
+    check("con la cesta en negativo, el Healer NO lo toca",
+          hedge.volume == 0.20, f"volumen ahora {hedge.volume}")
+
+    # Un perdedor direccional SI es amputable: la proteccion no paraliza al Healer.
+    legs_dir = [
+        (SELL, 0.20, +200.0, "SMC Sell Entry"),
+        (SELL, 0.40, -300.0, "Recovery Sell (V-Shape)"),  # rojo, mismo lado -> amputable
+        (BUY,  0.20, -50.0, "Hedge Lock"),
+    ]
+    b14, e14 = healer_setup(legs_dir)
+    recovery, hedge2 = b14._pos[1], b14._pos[2]
+    check("el hedge sigue protegido", e14._closing_increases_exposure(hedge2))
+    check("el recovery rojo NO es cobertura", not e14._closing_increases_exposure(recovery))
+    e14._apply_healing(500.0)
+    check("el Healer amputa el perdedor direccional", recovery.volume < 0.40,
+          f"0.40 -> {recovery.volume:.2f}")
+    check("y deja intacta la cobertura", hedge2.volume == 0.20)
+
+    # Con el ciclo en POSITIVO la proteccion se levanta: desarmar es legitimo y
+    # lo hace el Unwind; el Healer ya no tiene por que abstenerse.
+    b15, e15 = healer_setup(legs_1707, cycle_realized=5000.0)
+    hedge3 = b15._pos[-1]
+    e15._apply_healing(2000.0)
+    check("con el ciclo en positivo, la proteccion se levanta",
+          hedge3.volume < 0.20, f"0.20 -> {hedge3.volume:.2f}")
+
+    # El aviso se loguea una sola vez por ciclo (on_tick corre cada segundo).
+    b16, e16 = healer_setup(legs_1707)
+    for _ in range(10):
+        e16._apply_healing(2000.0)
+    n_cov = sum(1 for t, m in e16.log.events if t == "HEALER" and "Cobertura protegida" in m)
+    check("el aviso de cobertura protegida se loguea 1 vez por ciclo", n_cov == 1, f"n={n_cov}")
 
     print("\n" + "=" * 60)
     if fails:

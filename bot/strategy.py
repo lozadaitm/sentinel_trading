@@ -84,6 +84,7 @@ class SentinelEngine:
         self.last_healed_ticket = 0
         self.cycle_realized = 0.0            # B: P&L realizado del ciclo en curso (para el freeze del Unwind)
         self._healer_needs_rebaseline = True  # C: al iniciar ciclo, rebasa el cursor del Healer (presupuesto por ciclo)
+        self._cover_protect_logged = False    # dedupe del aviso de cobertura protegida (1 por ciclo)
         self.max_cycle_peak = 0.0
         self.cycle_armed = False      # trailing de cesta armado (OP8/OP9)
         self.spread_high = False      # cache del filtro de spread del tick actual
@@ -237,6 +238,7 @@ class SentinelEngine:
         self.cycle_armed = False
         self.cycle_realized = 0.0             # B: cierra el ciclo -> reinicia el realizado
         self._healer_needs_rebaseline = True  # C: el proximo ciclo rebasa el cursor del Healer
+        self._cover_protect_logged = False
 
     # ==============================================================
     # Filtros de entrada
@@ -477,16 +479,63 @@ class SentinelEngine:
         if budget > 0:
             self._apply_healing(budget)
 
+    def _closing_increases_exposure(self, p):
+        """True si cerrar `p` AUMENTA la exposicion neta absoluta de la cesta.
+
+        Es la definicion estructural de "leg de cobertura": no depende del
+        comment ni de quien lo abrio, sino de lo que su cierre le hace al
+        riesgo direccional. El Hedge Lock cumple esto por construccion mientras
+        siga cubriendo; deja de cumplirlo en cuanto la cesta se equilibra.
+        """
+        net = self._net_exposure()
+        contrib = p.volume if p.type == mt5.POSITION_TYPE_BUY else -p.volume
+        return abs(net - contrib) > abs(net)
+
     def _apply_healing(self, profit_available):
+        """Amputa parcialmente el peor leg AMPUTABLE con el presupuesto disponible.
+
+        Proteccion de la cobertura: mientras el P&L total del ciclo siga en
+        negativo, se excluyen los legs cuyo cierre aumentaria la exposicion neta.
+
+        Por que. `_apply_healing` era un argmin(profit+swap) sin nocion de rol:
+        no distinguia entrada, cobertura, recovery ni rescate. Y como recovery y
+        rescate abren SIEMPRE del lado de Op1, la cesta acumula N legs de un lado
+        y uno solo del otro -> en cuanto la tendencia acompaña, el hedge es el
+        peor leg por geometria, no por casualidad. En produccion, 16 de 21
+        amputaciones mordieron un Hedge Lock, a 0.01 lotes por vez (el ticket
+        #1609321275, 12 veces en 2h30m). Cada mordisco realiza ~90% del verde
+        acumulado como perdida, asi que el bot convertia en rojo permanente lo
+        que el Unwind acababa de bancar, y de paso desmontaba su unica cobertura.
+
+        El gate replica el freeze del Unwind (cycle_realized + neto flotante):
+        con la cesta en positivo la cobertura ya no hace falta y desarmarla es
+        trabajo del Unwind, que lo hace ordenadamente. Ver docs/memory:
+        healer-unwind-hedge-cascade.
+        """
+        protect_cover = (self.cycle_realized + self._basket_net_profit()) <= 0
+
         # Peor leg por DINERO REAL = profit + swap (antes solo miraba p.profit e
         # ignoraba el swap acumulado, que en holds largos puede ser material).
         worst = None
         worst_money = 1e9
+        cover_skipped = 0
         for p in self.b.positions():
+            if protect_cover and self._closing_increases_exposure(p):
+                cover_skipped += 1
+                continue
             money = p.profit + p.swap
             if money < worst_money:
                 worst_money = money
                 worst = p
+
+        if cover_skipped and not self._cover_protect_logged:
+            self.log.write(
+                "HEALER",
+                f"Cobertura protegida: {cover_skipped} leg(s) excluido(s) de la "
+                f"amputacion mientras el ciclo siga en negativo.",
+                balance=self.b.account_balance())
+            self._cover_protect_logged = True
+
         if worst is None or worst_money >= 0 or worst.volume <= 0:
             return
 
@@ -762,6 +811,7 @@ class SentinelEngine:
         if core_count == 0:
             self.cycle_realized = 0.0
             self._healer_needs_rebaseline = True
+            self._cover_protect_logged = False
 
         current_atr = self._effective_atr()
         point = self.b.point()
