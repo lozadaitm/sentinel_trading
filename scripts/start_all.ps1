@@ -133,10 +133,21 @@ Write-Ok "dependencias presentes (incl. rich/plotext para la TUI)"
 
 if (-not (Test-Path $InstancesDir)) { Write-Fail "no existe $InstancesDir"; exit 1 }
 
+# El bot lee DOS capas: bot/config.py::_load_dotenv() carga el .env de la raiz
+# con os.environ.setdefault(), asi que el .env de la instancia MANDA y el de la
+# raiz solo rellena lo que falte. El preflight tiene que validar lo mismo que
+# vera el proceso, no solo el fichero de la instancia.
+$rootEnv = @{}
+$rootEnvPath = Join-Path $projectRoot ".env"
+if (Test-Path $rootEnvPath) {
+    $rootEnv = Read-EnvFile $rootEnvPath
+    Write-Ok ".env raiz: $($rootEnv.Count) clave(s) compartida(s) como respaldo"
+}
+
 $envFiles = Get-ChildItem -Path $InstancesDir -Filter "*.env" |
-    Where-Object { $_.Name -notlike "example*" }
+    Where-Object { $_.Name -notlike "example*" -and $_.Name -notlike "template*" -and $_.Name -notlike "_*" }
 if (-not $envFiles) {
-    Write-Fail "no hay instancias en $InstancesDir (solo plantillas example*.env)."
+    Write-Fail "no hay instancias en $InstancesDir (solo plantillas)."
     Write-Host "         Copia instances\example.env y instances\example-m5.env." -ForegroundColor DarkGray
     exit 1
 }
@@ -148,15 +159,33 @@ $requiredKeys = @("USER_ID", "SYMBOL", "MAGIC_NUMBER", "BOT_ID",
                   "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY")
 
 foreach ($f in $envFiles) {
-    $cfg = Read-EnvFile $f.FullName
+    $own = Read-EnvFile $f.FullName
+
+    # Capa efectiva = raiz + instancia (la instancia gana), igual que en runtime.
+    $cfg = @{}
+    foreach ($k in $rootEnv.Keys) { $cfg[$k] = $rootEnv[$k] }
+    foreach ($k in $own.Keys)     { $cfg[$k] = $own[$k] }
+
     $missing = @()
     foreach ($k in $requiredKeys) {
         if (-not $cfg.ContainsKey($k) -or $cfg[$k] -eq "") { $missing += $k }
     }
     if ($missing.Count -gt 0) {
         Write-Fail "$($f.Name): faltan claves -> $($missing -join ', ')"
+        Write-Host "         Ponlas en $($f.FullName)" -ForegroundColor DarkGray
+        Write-Host "         (o en el .env de la raiz si son comunes a todas las instancias)" -ForegroundColor DarkGray
         $hardFail = $true
         continue
+    }
+
+    # BOT_ID y MAGIC_NUMBER identifican a ESTA instancia: heredarlos del .env
+    # compartido significa que la siguiente instancia nacera con la identidad
+    # de la anterior. validate_identity() lo cazaria despues, pero mas vale
+    # avisar ahora.
+    foreach ($k in @("BOT_ID", "MAGIC_NUMBER")) {
+        if (-not $own.ContainsKey($k)) {
+            Write-Warn "$($f.Name): $k se hereda del .env de la raiz ('$($cfg[$k])'). Deberia ser propio de la instancia."
+        }
     }
 
     $botId = $cfg["BOT_ID"]
