@@ -101,7 +101,40 @@ MT5_PASSWORD=<password_de_la_cuenta>
 - Si dejas `MT5_*` vacíos, el bot se conecta al terminal MT5 que ya esté **abierto y logueado**.
 - Si los rellenas, el bot **abre y loguea** ese terminal por sí mismo.
 
-## Arranque de una instancia
+## Arranque completo (recomendado)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start_all.ps1
+```
+
+Encadena en el orden correcto todo lo necesario y **aborta antes de operar** si algo
+no cuadra, para que no se pueda arrancar en un estado incoherente:
+
+| Fase | Qué hace | Si falla |
+|------|----------|----------|
+| 1. Preflight | python, dependencias, `.env` completos, y que `BOT_ID` y `MAGIC_NUMBER` se correspondan | **aborta** |
+| 2. Tests | regresión local (`tests/`), sin tocar MT5 ni Supabase | **aborta** |
+| 3. Auditorías | `audit_margin` (siempre) + `audit_m5_signals` (si la última tiene más de 30 días) | aborta solo si MT5 no responde |
+| 4. Lanzamiento | una ventana de PowerShell por bot, con la TUI. M15 primero | — |
+
+El preflight caza el fallo de configuración más caro: copiar el `.env` del M15 y
+cambiar solo `BOT_ID` dejando el mismo `MAGIC_NUMBER`. Los dos motores compartirían
+magic y cada uno vería las posiciones del otro como propias.
+
+Las auditorías son read-only y se archivan con fecha en `logs/audits/`, así queda
+histórico de cómo estaba la cuenta en cada arranque. Si `audit_margin` dice que el
+peor caso de la escalera **NO CABE** en el equity, pide confirmación antes de seguir.
+
+| Flag | Para qué |
+|------|----------|
+| `-M15Only` | levantar solo el Sentinel (mientras el M5 esté en validación) |
+| `-SkipAudits` | reinicio rápido el mismo día |
+| `-ForceAudits` | repetir `audit_m5_signals` aunque sea reciente |
+| `-DryRun` | preflight + tests + auditorías, sin lanzar los bots |
+| `-NoUI` | modo consola en vez de TUI |
+| `-SkipTests` | saltar la regresión (no recomendado tras un `git pull`) |
+
+## Arranque de una instancia suelta
 
 Desde la raíz del proyecto. El launcher carga el `.env` indicado y arranca el proceso.
 
