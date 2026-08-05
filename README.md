@@ -86,10 +86,14 @@ notepad instances\<USER_UUID>.env
 SUPABASE_URL=https://<tu-proyecto>.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=<service_role_key>
 
-# Identidad de ESTA instancia
+# Identidad de ESTE usuario
 USER_ID=<USER_UUID>
 SYMBOL=XAUUSD+
-MAGIC_NUMBER=100100
+
+# Motores a levantar sobre esta cuenta: m15 | m15,m5
+BOTS=m15
+MAGIC_M15=100100
+MAGIC_M5=100200
 
 # Terminal MT5 de la cuenta Vantage de este usuario
 MT5_PATH=C:\Program Files\MetaTrader 5\terminal64.exe
@@ -98,8 +102,22 @@ MT5_SERVER=VantageInternational-Live
 MT5_PASSWORD=<password_de_la_cuenta>
 ```
 
+- **Un fichero por usuario, no por bot.** Sobre la misma cuenta pueden correr el
+  Sentinel M15 y el Grinder M5: comparten credenciales y solo difieren en `BOT_ID`
+  y `MAGIC_NUMBER`, que **inyecta el launcher** a partir de `BOTS` y de
+  `MAGIC_M15`/`MAGIC_M5`. No dupliques el `.env`.
+- `MAGIC_M15` y `MAGIC_M5` deben ser **distintos**: son lo que permite a cada motor
+  ver solo sus posiciones y a la vez leer la cesta del vecino para calcular la
+  reserva de margen (`bot/budget.py`). El preflight aborta si coinciden.
+- Antes de añadir `m5` a `BOTS`: aplicar `migrations/002_bot_id.sql`, crear su fila
+  de `bot_config`/`bot_instances` y actualizar el dashboard para filtrar por `bot_id`.
 - Si dejas `MT5_*` vacíos, el bot se conecta al terminal MT5 que ya esté **abierto y logueado**.
 - Si los rellenas, el bot **abre y loguea** ese terminal por sí mismo.
+
+> El `.env` de la **raíz** del repo actúa como capa de respaldo: `bot/config.py`
+> lo carga con `setdefault()`, así que el de la instancia siempre gana. Sirve para
+> claves comunes a todos los usuarios (p. ej. `SUPABASE_*`). No pongas ahí `BOT_ID`
+> ni `MAGIC_NUMBER`.
 
 ## Arranque completo (recomendado)
 

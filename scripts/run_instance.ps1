@@ -1,24 +1,46 @@
 <#
 .SYNOPSIS
-    Arranca UNA instancia del bot cargando su archivo .env al entorno del proceso.
+    Arranca UN motor de UNA instancia, cargando su .env al entorno del proceso.
 
 .DESCRIPTION
-    Lee un archivo .env (KEY=VALUE por linea), setea esas variables SOLO en este
-    proceso y lanza `python -m bot.main`. Cada instancia = un usuario/cuenta.
+    Lee un archivo .env (KEY=VALUE por linea) y lanza el modulo de Python
+    correspondiente. Las variables se setean SOLO en este proceso.
+
+    Un .env = un USUARIO = una cuenta MT5. Los motores que corren sobre esa
+    cuenta (m15, m5) NO necesitan .env propio: comparten credenciales y difieren
+    unicamente en BOT_ID y MAGIC_NUMBER, que este script inyecta a partir de
+    -BotId y de MAGIC_M15 / MAGIC_M5.
+
+    Para levantar todos los motores de todos los usuarios de golpe, con
+    preflight y auditorias, usa scripts\start_all.ps1.
+
+.PARAMETER EnvFile
+    Ruta al .env del usuario.
+
+.PARAMETER BotId
+    Motor a arrancar: m15 (Sentinel) o m5 (Grinder). Si se omite, se toma
+    BOT_ID del .env, y si tampoco esta, m15.
+
+.PARAMETER UI
+    Arranca la TUI en vez del modo consola.
+
+.PARAMETER Module
+    Modulo de Python explicito. Anula la deduccion por BotId/UI.
 
 .EXAMPLE
-    scripts\run_instance.ps1 instances\usuarioA.env
-    scripts\run_instance.ps1 instances\usuarioA.env -Module bot.tui
+    scripts\run_instance.ps1 instances\daniel.env
+    scripts\run_instance.ps1 instances\daniel.env -BotId m5 -UI
+    scripts\run_instance.ps1 instances\daniel.env -Module bot.tui
 #>
 param(
     [Parameter(Mandatory = $true)]
     [string]$EnvFile,
 
-    # Modulo a ejecutar. Si no se pasa, se toma MODULE del .env; si tampoco
-    # esta, bot.main (Sentinel M15, consola).
-    #   bot.main     -> Sentinel M15
-    #   bot.main_m5  -> Grinder M5
-    #   bot.tui      -> UI en vivo del Sentinel
+    [ValidateSet("m15", "m5", "")]
+    [string]$BotId = "",
+
+    [switch]$UI,
+
     [string]$Module = ""
 )
 
@@ -39,13 +61,38 @@ Get-Content $EnvFile | ForEach-Object {
     Set-Item -Path "Env:$key" -Value $val
 }
 
-# Precedencia: -Module explicito > MODULE del .env > bot.main
-if ($Module -eq "") {
-    if ($env:MODULE) { $Module = $env:MODULE } else { $Module = "bot.main" }
+# --- Identidad del motor -------------------------------------------------
+# Precedencia: -BotId > BOT_ID del .env > m15.
+if ($BotId -eq "") {
+    if ($env:BOT_ID) { $BotId = $env:BOT_ID } else { $BotId = "m15" }
+}
+$env:BOT_ID = $BotId
+
+# El magic se deriva del motor. Solo se respeta un MAGIC_NUMBER del .env si el
+# usuario NO pidio un motor concreto (compatibilidad con .env de una sola
+# instancia); en cuanto se pasa -BotId, manda el mapa MAGIC_M15 / MAGIC_M5.
+$magicMap = @{
+    "m15" = $(if ($env:MAGIC_M15) { $env:MAGIC_M15 } else { "100100" })
+    "m5"  = $(if ($env:MAGIC_M5)  { $env:MAGIC_M5 }  else { "100200" })
+}
+if ($PSBoundParameters.ContainsKey("BotId") -or -not $env:MAGIC_NUMBER) {
+    $env:MAGIC_NUMBER = $magicMap[$BotId]
 }
 
-$botId = if ($env:BOT_ID) { $env:BOT_ID } else { "m15" }
-Write-Host "Arrancando instancia: USER_ID=$env:USER_ID SYMBOL=$env:SYMBOL BOT_ID=$botId MAGIC=$env:MAGIC_NUMBER (modulo: $Module)" -ForegroundColor Cyan
+# --- Modulo --------------------------------------------------------------
+if ($Module -eq "") {
+    if ($env:MODULE) {
+        $Module = $env:MODULE
+    } elseif ($BotId -eq "m5") {
+        if ($UI) { $Module = "bot.tui_m5" } else { $Module = "bot.main_m5" }
+    } else {
+        if ($UI) { $Module = "bot.tui" } else { $Module = "bot.main" }
+    }
+}
+
+$etiqueta = "Sentinel M15"
+if ($BotId -eq "m5") { $etiqueta = "Grinder M5" }
+Write-Host "Arrancando $etiqueta | USER_ID=$env:USER_ID SYMBOL=$env:SYMBOL BOT_ID=$env:BOT_ID MAGIC=$env:MAGIC_NUMBER (modulo: $Module)" -ForegroundColor Cyan
 
 # Correr desde la raiz del proyecto (padre de scripts/).
 $projectRoot = Split-Path -Parent $PSScriptRoot

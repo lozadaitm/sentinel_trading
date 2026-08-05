@@ -8,7 +8,11 @@
     se pueda arrancar en un estado incoherente por saltarse un paso.
 
     Fases:
-      1. Preflight   - python, dependencias, .env completos, BOT_ID vs MAGIC.
+      1. Preflight   - python, dependencias, .env completos, magics distintos.
+
+    Un .env = un USUARIO = una cuenta MT5. Los motores que corren sobre esa
+    cuenta se declaran en BOTS (p.ej. BOTS=m15,m5); no hay un .env por bot.
+    BOT_ID y MAGIC_NUMBER los inyecta el launcher desde MAGIC_M15/MAGIC_M5.
       2. Tests       - regresion local (no toca MT5 ni Supabase).
       3. Auditorias  - audit_margin (siempre) y audit_m5_signals (si toca).
       4. Lanzamiento - una ventana de PowerShell por bot, con la TUI.
@@ -40,7 +44,8 @@
     Lanza bot.main / bot.main_m5 (consola) en vez de las TUI.
 
 .PARAMETER M15Only
-    Levanta solo el Sentinel. Util mientras el M5 sigue en validacion.
+    Levanta solo el Sentinel, ignorando el m5 declarado en BOTS. Util mientras
+    el M5 sigue en validacion.
 
 .PARAMETER DryRun
     Hace preflight, tests y auditorias, pero NO lanza los bots.
@@ -148,20 +153,23 @@ $envFiles = Get-ChildItem -Path $InstancesDir -Filter "*.env" |
     Where-Object { $_.Name -notlike "example*" -and $_.Name -notlike "template*" -and $_.Name -notlike "_*" }
 if (-not $envFiles) {
     Write-Fail "no hay instancias en $InstancesDir (solo plantillas)."
-    Write-Host "         Copia instances\example.env y instances\example-m5.env." -ForegroundColor DarkGray
+    Write-Host "         Copia instances\example.env a instances\<usuario>.env y rellenalo." -ForegroundColor DarkGray
     exit 1
 }
 
-# Clasifica por BOT_ID y valida cada .env.
+# Un .env = un USUARIO = una cuenta MT5. Los motores que corren sobre esa cuenta
+# se declaran en BOTS (coma-separado) y NO necesitan .env propio: comparten
+# credenciales y difieren solo en BOT_ID y MAGIC_NUMBER, que inyecta el launcher
+# a partir de MAGIC_M15 / MAGIC_M5.
 $instances = @()
 $hardFail = $false
-$requiredKeys = @("USER_ID", "SYMBOL", "MAGIC_NUMBER", "BOT_ID",
-                  "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY")
+$requiredKeys = @("USER_ID", "SYMBOL", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY")
 
 foreach ($f in $envFiles) {
     $own = Read-EnvFile $f.FullName
 
-    # Capa efectiva = raiz + instancia (la instancia gana), igual que en runtime.
+    # Capa efectiva = raiz + instancia (la instancia gana), igual que en runtime:
+    # bot/config.py::_load_dotenv() carga el .env de la raiz con setdefault().
     $cfg = @{}
     foreach ($k in $rootEnv.Keys) { $cfg[$k] = $rootEnv[$k] }
     foreach ($k in $own.Keys)     { $cfg[$k] = $own[$k] }
@@ -173,63 +181,61 @@ foreach ($f in $envFiles) {
     if ($missing.Count -gt 0) {
         Write-Fail "$($f.Name): faltan claves -> $($missing -join ', ')"
         Write-Host "         Ponlas en $($f.FullName)" -ForegroundColor DarkGray
-        Write-Host "         (o en el .env de la raiz si son comunes a todas las instancias)" -ForegroundColor DarkGray
+        Write-Host "         (o en el .env de la raiz si son comunes a todos los usuarios)" -ForegroundColor DarkGray
         $hardFail = $true
         continue
     }
 
-    # BOT_ID y MAGIC_NUMBER identifican a ESTA instancia: heredarlos del .env
-    # compartido significa que la siguiente instancia nacera con la identidad
-    # de la anterior. validate_identity() lo cazaria despues, pero mas vale
-    # avisar ahora.
-    foreach ($k in @("BOT_ID", "MAGIC_NUMBER")) {
-        if (-not $own.ContainsKey($k)) {
-            Write-Warn "$($f.Name): $k se hereda del .env de la raiz ('$($cfg[$k])'). Deberia ser propio de la instancia."
-        }
+    # Motores a levantar para este usuario.
+    if ($cfg.ContainsKey("BOTS") -and $cfg["BOTS"] -ne "") {
+        $bots = @($cfg["BOTS"].Split(",") | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ -ne "" })
+    } elseif ($cfg.ContainsKey("BOT_ID") -and $cfg["BOT_ID"] -ne "") {
+        # Compatibilidad con .env de una sola instancia.
+        $bots = @($cfg["BOT_ID"])
+    } else {
+        $bots = @("m15")
     }
 
-    $botId = $cfg["BOT_ID"]
-    $magic = [int]$cfg["MAGIC_NUMBER"]
-
-    # Misma comprobacion que config.validate_identity(), adelantada al arranque
-    # para no descubrirla cuando ya se abrio la ventana.
-    $expected = $null
-    if ($botId -eq "m15") {
-        if ($cfg.ContainsKey("MAGIC_M15")) { $expected = [int]$cfg["MAGIC_M15"] } else { $expected = 100100 }
-    } elseif ($botId -eq "m5") {
-        if ($cfg.ContainsKey("MAGIC_M5")) { $expected = [int]$cfg["MAGIC_M5"] } else { $expected = 100200 }
-    }
-    if ($null -ne $expected -and $magic -ne $expected) {
-        Write-Fail "$($f.Name): BOT_ID=$botId pero MAGIC_NUMBER=$magic (esperado $expected)."
-        Write-Host "         Los dos motores compartirian magic y se verian las posiciones mutuamente." -ForegroundColor DarkGray
+    $desconocidos = @($bots | Where-Object { $_ -ne "m15" -and $_ -ne "m5" })
+    if ($desconocidos.Count -gt 0) {
+        Write-Fail "$($f.Name): BOTS contiene motores desconocidos -> $($desconocidos -join ', '). Validos: m15, m5."
         $hardFail = $true
         continue
     }
-
-    if ($cfg.ContainsKey("MAGIC_M15") -and $cfg.ContainsKey("MAGIC_M5")) {
-        if ([int]$cfg["MAGIC_M15"] -eq [int]$cfg["MAGIC_M5"]) {
-            Write-Fail "$($f.Name): MAGIC_M15 y MAGIC_M5 son el mismo numero."
-            $hardFail = $true
-            continue
-        }
+    if (@($bots | Where-Object { $_ -eq "m15" }).Count -eq 0) {
+        Write-Warn "$($f.Name): BOTS no incluye m15. El M5 depende del Sentinel para la reserva de margen."
     }
 
-    $module = "bot.main"
-    if ($cfg.ContainsKey("MODULE")) { $module = $cfg["MODULE"] }
-    if (-not $NoUI) {
-        if ($module -eq "bot.main")    { $module = "bot.tui" }
-        if ($module -eq "bot.main_m5") { $module = "bot.tui_m5" }
+    $magicM15 = 100100
+    $magicM5  = 100200
+    if ($cfg.ContainsKey("MAGIC_M15")) { $magicM15 = [int]$cfg["MAGIC_M15"] }
+    if ($cfg.ContainsKey("MAGIC_M5"))  { $magicM5  = [int]$cfg["MAGIC_M5"] }
+    if ($magicM15 -eq $magicM5) {
+        Write-Fail "$($f.Name): MAGIC_M15 y MAGIC_M5 son el mismo numero ($magicM15)."
+        Write-Host "         Los dos motores se verian las posiciones mutuamente." -ForegroundColor DarkGray
+        $hardFail = $true
+        continue
     }
 
     $shadow = "no"
     if ($cfg.ContainsKey("SHADOW_MODE") -and $cfg["SHADOW_MODE"] -match "^(?i:true|1)$") { $shadow = "SI" }
 
-    $instances += [PSCustomObject]@{
-        Name = $f.BaseName; Path = $f.FullName; Cfg = $cfg
-        BotId = $botId; Magic = $magic; Module = $module
-        Symbol = $cfg["SYMBOL"]; Shadow = $shadow
+    Write-Ok "$($f.Name): usuario=$($cfg['USER_ID'].Substring(0,8))... symbol=$($cfg['SYMBOL']) motores=[$($bots -join ', ')] sombra=$shadow"
+
+    foreach ($b in $bots) {
+        if ($b -eq "m5") { $magic = $magicM5;  $mod = "bot.main_m5" }
+        else             { $magic = $magicM15; $mod = "bot.main" }
+        if (-not $NoUI) {
+            if ($mod -eq "bot.main")    { $mod = "bot.tui" }
+            if ($mod -eq "bot.main_m5") { $mod = "bot.tui_m5" }
+        }
+        $instances += [PSCustomObject]@{
+            Name = $f.BaseName; Path = $f.FullName; Cfg = $cfg
+            BotId = $b; Magic = $magic; Module = $mod
+            Symbol = $cfg["SYMBOL"]; Shadow = $shadow
+        }
+        Write-Host "           -> $b : magic=$magic modulo=$mod" -ForegroundColor DarkGray
     }
-    Write-Ok "$($f.Name): bot_id=$botId magic=$magic symbol=$($cfg['SYMBOL']) modulo=$module sombra=$shadow"
 }
 
 if ($hardFail) { Write-Host ""; Write-Fail "preflight fallido. No se arranca nada."; exit 1 }
@@ -363,7 +369,7 @@ foreach ($i in $aLanzar) {
     Write-Host "  Lanzando $etiqueta ($($i.Name)) -> $($i.Module)" -ForegroundColor Green
     Start-Process powershell -ArgumentList @(
         "-NoExit", "-ExecutionPolicy", "Bypass",
-        "-File", "`"$runner`"", "`"$($i.Path)`"", "-Module", $i.Module
+        "-File", "`"$runner`"", "`"$($i.Path)`"", "-BotId", $i.BotId, "-Module", $i.Module
     )
     Start-Sleep -Milliseconds 1500
 }
@@ -372,7 +378,7 @@ Write-Host ""
 Write-Host ("=" * 72) -ForegroundColor DarkCyan
 Write-Ok "$($aLanzar.Count) bot(s) lanzado(s). Cada uno en su ventana."
 if ($m5.Count -eq 0) {
-    Write-Host "         Solo M15. Para levantar tambien el M5, crea instances\<usuario>-m5.env" -ForegroundColor DarkGray
+    Write-Host "         Solo M15. Para levantar tambien el M5, pon BOTS=m15,m5 en el .env del usuario." -ForegroundColor DarkGray
 }
 Write-Host "         Cerrar una ventana (Ctrl+C) detiene esa instancia limpiamente." -ForegroundColor DarkGray
 Write-Host "         Auditorias archivadas en logs\audits\" -ForegroundColor DarkGray

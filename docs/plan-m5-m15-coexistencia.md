@@ -314,8 +314,11 @@ este plan elimina.
 
 ## Fase 7 — Operación
 
-- `instances/<usuario>-m5.env`: mismo `USER_ID`, mismo `SYMBOL`, mismo terminal;
-  `BOT_ID=m5`, `MAGIC_NUMBER=<magic M5>`.
+- **Un solo `.env` por usuario.** El M5 no lleva fichero propio: se declara con
+  `BOTS=m15,m5` en el `.env` del usuario, y el launcher inyecta `BOT_ID` y
+  `MAGIC_NUMBER` desde `MAGIC_M15`/`MAGIC_M5`. Duplicar el `.env` significaba
+  duplicar credenciales de Supabase y MT5, con el riesgo de que se
+  desincronicen.
 - `launch_all.ps1` ya levanta un proceso por `.env` — funciona sin cambios, pero el
   `.env` del M5 debe indicar `-Module bot.main_m5`. Alternativa: variable `MODULE` en el
   `.env` leída por `run_instance.ps1`.
