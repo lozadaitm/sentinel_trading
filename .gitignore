@@ -12,6 +12,10 @@ TRADING PYTHON.txt
 # Logs del bot
 #*.csv
 
+# Config local de Claude Code (allowlist de permisos por-maquina).
+# .claude/settings.json (compartido) SI se versiona si algun dia existe.
+.claude/settings.local.json
+
 # Python
 __pycache__/
 *.py[cod]
