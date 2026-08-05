@@ -462,6 +462,42 @@ def run():
     check("el SL del Smart Trail queda POR ENCIMA de la entrada (nunca es un stop de perdida)",
           op.sl > op.price_open, f"{op.sl:.2f} > {op.price_open:.2f}")
 
+    # ---------- 12. Guard de identidad: BOT_ID vs MAGIC_NUMBER ----------
+    print("\n[12] Guard de identidad de la instancia")
+    import importlib
+    import os as _os
+
+    def reload_config(bot_id, magic, m15=None, m5=None):
+        prev = {k: _os.environ.get(k)
+                for k in ("BOT_ID", "MAGIC_NUMBER", "MAGIC_M15", "MAGIC_M5")}
+        _os.environ["BOT_ID"] = bot_id
+        _os.environ["MAGIC_NUMBER"] = str(magic)
+        if m15: _os.environ["MAGIC_M15"] = str(m15)
+        if m5: _os.environ["MAGIC_M5"] = str(m5)
+        try:
+            import bot.config as c
+            return importlib.reload(c)
+        finally:
+            for k, v in prev.items():
+                if v is None: _os.environ.pop(k, None)
+                else: _os.environ[k] = v
+
+    def aborta(bot_id, magic, **kw):
+        try:
+            reload_config(bot_id, magic, **kw).validate_identity()
+            return False
+        except SystemExit:
+            return True
+
+    check("m15 con su magic arranca", not aborta("m15", 100100))
+    check("m5 con su magic arranca", not aborta("m5", 100200))
+    check("m5 con el magic del M15 ABORTA (el .env copiado sin tocar)", aborta("m5", 100100))
+    check("m15 con el magic del M5 ABORTA", aborta("m15", 100200))
+    check("MAGIC_M15 == MAGIC_M5 ABORTA", aborta("m15", 100100, m15=100100, m5=100100))
+    check("BOT_ID desconocido avisa pero no aborta",
+          len(reload_config("m30", 100300).validate_identity()) == 1)
+    reload_config("m15", 100100)  # restaura el modulo para el resto de la sesion
+
     print("\n" + "=" * 60)
     if fails:
         print("FALLOS (%d): %s" % (len(fails), fails))

@@ -69,6 +69,49 @@ ALL_MAGICS = (MAGIC_M15, MAGIC_M5)
 # sin necesidad de IPC ni de pasar por la DB. Ver bot/budget.py.
 PEER_MAGICS = tuple(m for m in ALL_MAGICS if m != MAGIC_NUMBER)
 
+# Magic que le corresponde a cada BOT_ID. Lo verifica validate_identity().
+EXPECTED_MAGIC = {"m15": MAGIC_M15, "m5": MAGIC_M5}
+
+
+def validate_identity():
+    """Aborta el arranque si BOT_ID y MAGIC_NUMBER no se corresponden.
+
+    El fallo mas facil de cometer al montar la segunda instancia es copiar el
+    .env del M15 y cambiar solo BOT_ID, dejando MAGIC_NUMBER=100100. Los dos
+    procesos compartirian magic y cada motor veria las posiciones del otro como
+    propias: el Healer amputaria scalps del M5, core_count contaria de mas, el
+    Hedge Lock cubriria el volumen equivocado y el Sentinel encontraria SLs que
+    el nunca puso. Es silencioso y destructivo, asi que se corta en el arranque.
+
+    Devuelve la lista de avisos no fatales (p.ej. un BOT_ID desconocido, que es
+    valido pero impide comprobar nada).
+    """
+    warnings = []
+    expected = EXPECTED_MAGIC.get(BOT_ID)
+    if expected is None:
+        warnings.append(
+            f"BOT_ID='{BOT_ID}' no esta en EXPECTED_MAGIC: no se puede validar el magic."
+        )
+        return warnings
+
+    if MAGIC_NUMBER != expected:
+        raise SystemExit(
+            f"\n[ABORTADO] Identidad de la instancia incoherente.\n"
+            f"  BOT_ID       = {BOT_ID}\n"
+            f"  MAGIC_NUMBER = {MAGIC_NUMBER}\n"
+            f"  esperado     = {expected}\n\n"
+            f"Cada motor necesita SU PROPIO magic o los dos procesos se veran las\n"
+            f"posiciones mutuamente y corromperan la cesta. Corrige MAGIC_NUMBER\n"
+            f"en el .env de esta instancia (ver instances/example-m5.env).\n"
+        )
+
+    if len(set(ALL_MAGICS)) != len(ALL_MAGICS):
+        raise SystemExit(
+            f"\n[ABORTADO] MAGIC_M15 y MAGIC_M5 son el mismo numero ({MAGIC_M15}).\n"
+            f"Deben ser distintos en TODOS los .env del mismo usuario.\n"
+        )
+    return warnings
+
 # Usuario que identifica la fila de bot_config/bot_instances a cargar.
 # = auth.users.id en Supabase. Se pasa por .env de la instancia.
 USER_ID = os.environ.get("USER_ID", ADMIN_USER_UUID)

@@ -15,6 +15,12 @@
 -- es exactamente lo que hoy son. El dashboard web que no filtre por bot_id
 -- seguira viendo los datos del M15 sin cambios hasta que arranque el M5.
 --
+-- ESTADO: APLICADA a sentinel-platform (ttlfzaihkjdxkryrqnmk) el 2026-08-05
+--   como migracion `bot_id_multi_bot_and_margin_governance`.
+--   Las 5 tablas quedaron backfilleadas a 'm15' (1 instancia, 1 config,
+--   1 state, 223 positions, 632 logs). Verificado: PKs compuestas activas,
+--   RLS intacta en las 5 tablas, sin FKs que bloquearan el DROP CONSTRAINT.
+--
 -- ORDEN DE DESPLIEGUE:
 --   1. Aplicar esta migracion.
 --   2. Desplegar el bot (bot/db.py ya filtra por bot_id).
@@ -99,6 +105,28 @@ ALTER TABLE public.bot_config
     ADD COLUMN IF NOT EXISTS margin_safety_mult DOUBLE PRECISION DEFAULT 1.1;
 
 -- ------------------------------------------------------------------
+-- 7b. Paridad codigo<->DB. Estos parametros vivian SOLO en el diccionario
+--     DEFAULTS de bot/strategy.py: no tenian columna, asi que no eran
+--     ajustables desde el dashboard y el bot usaba siempre el valor del
+--     codigo. Los defaults de abajo replican ese valor exacto, de modo que
+--     el comportamiento no cambia; solo pasan a ser configurables.
+--     (Detectado al auditar la base antes de migrar: max_net_lots, el
+--     parametro que estrangula la escalera del martingala, no existia.)
+-- ------------------------------------------------------------------
+ALTER TABLE public.bot_config
+    ADD COLUMN IF NOT EXISTS max_net_lots             DOUBLE PRECISION DEFAULT 1.0,
+    ADD COLUMN IF NOT EXISTS max_rescue_legs          INTEGER          DEFAULT 3,
+    ADD COLUMN IF NOT EXISTS rescue_cooldown          INTEGER          DEFAULT 30,
+    ADD COLUMN IF NOT EXISTS recovery_min_spacing_atr DOUBLE PRECISION DEFAULT 1.0,
+    ADD COLUMN IF NOT EXISTS use_recovery_h4_gate     BOOLEAN          DEFAULT true,
+    ADD COLUMN IF NOT EXISTS use_vol_breaker          BOOLEAN          DEFAULT true,
+    ADD COLUMN IF NOT EXISTS vcb_atr_mult             DOUBLE PRECISION DEFAULT 2.8,
+    ADD COLUMN IF NOT EXISTS healer_min_core          INTEGER          DEFAULT 3,
+    ADD COLUMN IF NOT EXISTS min_green_profit         DOUBLE PRECISION DEFAULT 3.0,
+    ADD COLUMN IF NOT EXISTS grinder_cooldown         INTEGER          DEFAULT 120,
+    ADD COLUMN IF NOT EXISTS grinder_min_atr_points   INTEGER          DEFAULT 80;
+
+-- ------------------------------------------------------------------
 -- 8. Parametros del motor M5 (port de Grinder_Anterior.mq5).
 --    Viven en la MISMA tabla: la fila bot_id='m5' los usa y la fila
 --    bot_id='m15' simplemente los ignora.
@@ -153,6 +181,10 @@ ALTER TABLE public.bot_config
 COMMIT;
 
 -- ==================================================================
+-- SEED: YA EJECUTADO para user_id e8d840ab-9b7c-4a05-adf9-fec9f1d4adb7
+-- (bot_instances.is_active = false: el M5 no operara hasta encenderlo).
+-- Se conserva como referencia para nuevos usuarios.
+--
 -- SEED (opcional): crear la fila de config y la instancia del bot M5
 -- clonando la del M15. Sustituir <USER_UUID> y <SYMBOL>.
 -- Ejecutar SOLO cuando se vaya a arrancar el M5.

@@ -84,6 +84,10 @@ def setup(logger=None, engine_cls=None):
     if engine_cls is None:
         engine_cls = SentinelEngine
 
+    # Antes de tocar MT5 o la DB: si BOT_ID y MAGIC_NUMBER no se corresponden,
+    # los dos motores se verian las posiciones mutuamente. Aborta el arranque.
+    identity_warnings = config.validate_identity()
+
     if not mt5.initialize(**_mt5_init_kwargs()):
         raise RuntimeError(f"No se pudo inicializar MetaTrader 5: {mt5.last_error()}")
 
@@ -125,6 +129,8 @@ def setup(logger=None, engine_cls=None):
                  f"{engine_cls.__name__} INICIADO. bot_id={config.BOT_ID} magic={config.MAGIC_NUMBER} "
                  f"user={who} symbol={config.SYMBOL}",
                  balance=broker.account_balance())
+    for w in identity_warnings:
+        logger.write("SYSTEM", f"[AVISO] {w}")
     if config.SHADOW_MODE:
         logger.write("SYSTEM", "MODO SOMBRA activo: no se enviaran ordenes reales; solo se loguean decisiones.")
 
