@@ -336,7 +336,7 @@ class M5Engine:
             return False
         self.now = tick.time
 
-        df5 = self._rates(config.TIMEFRAME_GRINDER)
+        df5 = self._rates(config.TIMEFRAME_M5)
         if df5 is None:
             return False
         self.df_m5 = df5

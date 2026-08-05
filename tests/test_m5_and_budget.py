@@ -394,7 +394,7 @@ def run():
             return T()
         def _rates(self, timeframe, count=150, min_bars=60):
             if timeframe == config.TIMEFRAME_STRUCT: return self._dh4.copy()
-            if timeframe == config.TIMEFRAME_GRINDER: return self._d5.copy()
+            if timeframe == config.TIMEFRAME_M5: return self._d5.copy()
             return self._d15.copy()
 
     def m15_engine(broker, logger, df15=None):

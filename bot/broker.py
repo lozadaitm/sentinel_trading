@@ -172,6 +172,9 @@ class Broker:
     def _open_log_type(comment):
         """Mapea el comment de apertura a un log_type analizable en bot_logs."""
         c = comment or ""
+        # "Grinder ..." es el prefijo historico del scalper embebido en el
+        # Sentinel (ya extraido); "M5 ..." es el del motor M5 actual. Se
+        # conservan ambos para que el histórico de bot_logs siga clasificando.
         if c.startswith("Grinder") or c.startswith("M5 "):
             return "GRINDER"
         if c.startswith("Hedge"):

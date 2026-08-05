@@ -1,8 +1,13 @@
-"""SentinelEngine: port 1:1 del EA MQL5 'M15 Gold Sentinel HyperGrinder v20.0'.
+"""SentinelEngine: motor M15, derivado del EA MQL5 'M15 Gold Sentinel HyperGrinder v20.0'.
 
 Maquina de estados por numero de posiciones (0/1/2/3+) + subsistemas
-transversales (Healer, Profit Banking, Grinder trailing). on_tick() replica
-OnTick del MQL5. Los parametros se reciben en self.cfg (cargados de bot_config).
+transversales (Healer, Profit Banking). on_tick() replica OnTick del MQL5.
+Los parametros se reciben en self.cfg (cargados de bot_config).
+
+El scalper M5 que el EA original llevaba embebido ("Bio-Reactor / Smart
+Grinder") YA NO VIVE AQUI: se extrajo a su propio proceso y su propio magic
+(bot/strategy_m5.py). Consecuencia directa: todas las posiciones que este
+motor ve por su magic son cesta core, sin excepciones ni filtros de identidad.
 
 Indexacion: ver bot/indicators.py. MQL5 [0]==.iloc[-1], [1]==.iloc[-2].
 Tiempos: se usa el epoch del servidor (tick.time) para todas las comparaciones
@@ -25,10 +30,6 @@ DEFAULTS = {
     "use_dynamic_hedge": True, "hedge_dist": 350, "hedge_atr_mult": 2.0,
     "use_healer": True, "healer_balance_bias": True, "healer_min_core": 3, "use_unwind_mode": True,
     "unwind_atr_mult": 2.0, "unwind_money_floor": 30.0,
-    "use_grinder": True, "grinder_lots": 0.05, "grinder_time_stop": 45,
-    "grinder_adx_trend": 30, "grinder_rsi_ob": 70, "grinder_rsi_os": 30,
-    "grinder_use_trail": True, "grinder_trail_start": 50, "grinder_trail_dist": 20,
-    "grinder_turbo_trig": 150, "grinder_turbo_dist": 50,
     "use_pullback": True, "atr_entry_distance": 2.5, "use_h4_struct": True,
     "entry_rsi_max": 75, "entry_rsi_min": 25,
     "use_smart_trail": True, "trail_activate": 1.0, "trail_dist_atr": 1.5,
@@ -42,8 +43,6 @@ DEFAULTS = {
     # --- Nuevos (optimizaciones de esta revision) ---
     "recovery_min_spacing_atr": 1.0,  # OP3 anti-espera v2: separacion minima por ATR del ultimo leg
     "rescue_cooldown": 30,            # OP4: segundos minimos entre rescates (anti-spam de L3)
-    "grinder_cooldown": 120,          # OP11: segundos minimos entre aperturas de grinder (anti-churn)
-    "grinder_min_atr_points": 80,     # OP11: ATR minimo (pts) para permitir scalpeo
     "min_green_profit": 3.0,          # OP12: piso verde del trail en OP1 sola; bajo esto se desarma a hedge (no cierra rojo)
     # --- Fork A: respiro/supervivencia ante volatilidad anomala (noticia/manipulacion) ---
     "use_vol_breaker": True,          # VCB: circuit breaker de volatilidad (bloquea aperturas, no la gestion)
@@ -57,9 +56,6 @@ DEFAULTS = {
     "ml_no_add": 200.0,               # bajo este margin level no se abren aditivas (el hedge sigue)
     "ml_flatten": 0.0,                # el senior nunca se auto-liquida: lo hace el M5
 }
-
-_LOT_EPS = 1e-8
-
 
 def _struct_txt(v):
     return {1: "Alcista (+1)", -1: "Bajista (-1)"}.get(v, "Neutral (0)")
@@ -95,7 +91,6 @@ class SentinelEngine:
         self.is_active = False         # espejo de bot_instances.is_active (Supabase) para la UI; lo setea main.trading_loop
         self.user_email = None         # email del usuario (auth.users) para identificar la instancia en la UI
         self.last_rescue_time = 0     # cooldown de rescate (OP4)
-        self.last_grinder_open = 0    # cooldown de apertura de grinder (OP11)
         self.vol_breaker = False      # VCB activo este tick (Fork A)
         self.vol_breaker_prev = False # para loguear solo las transiciones del VCB
         self.struct_h4 = 0            # estructura H4 del tick (cache para gates de recovery/rescue)
@@ -104,8 +99,7 @@ class SentinelEngine:
         self.now = 0
         self.atr0 = self.atr1 = 0.0
         self.ema0 = self.rsi0 = 0.0
-        self.g_ema0 = self.g_adx0 = self.g_rsi0 = 0.0
-        self.m5_close0 = self.m5_open1 = self.m5_close1 = 0.0
+        self.m5_open1 = self.m5_close1 = 0.0
         self.df_h4 = None
         self.df_m15 = None
 
@@ -137,27 +131,15 @@ class SentinelEngine:
     def _effective_atr(self):
         return max(self.atr0, self.b.point() * 150)
 
-    def _is_grinder(self, p):
-        """RF-E: identifica al grinder por COMMENT (robusto), con fallback a lote.
-
-        El lote exacto chocaba con cualquier posicion que casualmente valiera
-        grinder_lots. El comment de apertura ("Grinder ...") es fiable; si el
-        broker lo recorta, cae al criterio de lote como respaldo.
-        """
-        comment = getattr(p, "comment", "") or ""
-        if "Grinder" in comment:
-            return True
-        return abs(p.volume - float(self._p("grinder_lots"))) < _LOT_EPS
-
     # ==============================================================
     # Fork A: respiro/supervivencia (VCB + tope neto + gate H4)
     # ==============================================================
     def _vol_breaker_active(self):
         """Circuit breaker de volatilidad. True si la vela M15 EN CURSO es anomala
         (rango high-low >= ATR * vcb_atr_mult). Mientras este activo se bloquean
-        SOLO las aperturas que ANADEN riesgo (entry, recovery, rescate, grinder),
-        igual que spread_high: el Hedge (proteccion), cierres, trailing y healer
-        siguen corriendo. Captura noticia, manipulacion o spikes fuera de calendario.
+        SOLO las aperturas que ANADEN riesgo (entry, recovery, rescate), igual que
+        spread_high: el Hedge (proteccion), cierres, trailing y healer siguen
+        corriendo. Captura noticia, manipulacion o spikes fuera de calendario.
         """
         if not self._p("use_vol_breaker"):
             return False
@@ -170,11 +152,9 @@ class SentinelEngine:
         return bar_range >= atr * float(self._p("vcb_atr_mult"))
 
     def _net_exposure(self):
-        """Lotes netos de la cesta core (long - short). Excluye scalps del grinder."""
+        """Lotes netos de la cesta (long - short)."""
         net = 0.0
         for p in self.b.positions():
-            if self._is_grinder(p):
-                continue
             net += p.volume if p.type == mt5.POSITION_TYPE_BUY else -p.volume
         return net
 
@@ -463,8 +443,7 @@ class SentinelEngine:
         # antes realizaria en rojo una entrada que aun debe cubrirse. Se sale ANTES de
         # tocar el cursor para NO consumir presupuesto: los ganadores nuevos se siguen
         # acumulando y quedan disponibles cuando la cesta llega a OP3+.
-        core_count = sum(1 for p in self.b.positions() if not self._is_grinder(p))
-        if core_count < int(self._p("healer_min_core")):
+        if len(self.b.positions()) < int(self._p("healer_min_core")):
             return
 
         to_dt = datetime.datetime.utcfromtimestamp(self.now) + datetime.timedelta(minutes=5)
@@ -504,8 +483,6 @@ class SentinelEngine:
         worst = None
         worst_money = 1e9
         for p in self.b.positions():
-            if self._is_grinder(p):
-                continue  # no amputar los scalps del grinder
             money = p.profit + p.swap
             if money < worst_money:
                 worst_money = money
@@ -551,101 +528,6 @@ class SentinelEngine:
                     f"Amputacion Tactica sobre {op_side} '{op_desc}' (ticket #{op_ticket}) "
                     f"abierta @ {op_open:.2f}. Lotes amputados: {lots_to_close:.2f}",
                     worst_money, budget, self.b.account_balance(), ticket=op_ticket)
-
-    # ==============================================================
-    # SMART GRINDER
-    # ==============================================================
-    def _run_grinder(self):
-        if not self._p("use_grinder"):
-            return
-        grinder_lots = float(self._p("grinder_lots"))
-
-        # A. Time stop / limpieza (corre siempre; limpia perdedores Y break-even)
-        grinder_ops = 0
-        time_stop = int(self._p("grinder_time_stop")) * 60
-        for p in self.b.positions():
-            if self._is_grinder(p):
-                grinder_ops += 1
-                if self.now - p.time > time_stop and p.profit <= 0:
-                    tkt = p.ticket
-                    self.b.close_position(p, "Grinder TimeStop")
-                    self.cycle_realized += p.profit + p.swap  # B: realizado del ciclo (incl. swap)
-                    self.log.write("GRINDER", "TimeStop Activado. Limpiando zona.", p.profit,
-                                   balance=self.b.account_balance(), ticket=tkt)
-                    return
-        if grinder_ops >= 1:
-            return  # Solo 1 Grinder a la vez
-
-        # --- Gates de apertura (OP11) ---
-        if self.spread_high or self.vol_breaker or self.close_only:
-            return  # no scalpear con spread alto, vela anomala (VCB) ni en close-only
-        if self.now - self.last_grinder_open < int(self._p("grinder_cooldown")):
-            return  # anti-churn: respeta cooldown tras el ultimo grinder
-        if (self.atr0 / self.b.point()) < int(self._p("grinder_min_atr_points")):
-            return  # mercado sin volatilidad: no scalpear
-        if not self.gov.can_open(grinder_lots, mt5.ORDER_TYPE_BUY, budget.KIND_ADDITIVE):
-            return
-
-        # B. Entrada SmartCut M5
-        adx = self.g_adx0
-        rsi = self.g_rsi0
-        close_m5 = self.m5_close0
-        ma_m5 = self.g_ema0
-
-        opened = False
-        if adx < int(self._p("grinder_adx_trend")):
-            # Modo Scalper (reversion) - ADX bajo
-            if rsi < int(self._p("grinder_rsi_os")):
-                self.b.market_order(mt5.ORDER_TYPE_BUY, grinder_lots, "Grinder Scalp Buy")
-                opened = True
-            elif rsi > int(self._p("grinder_rsi_ob")):
-                self.b.market_order(mt5.ORDER_TYPE_SELL, grinder_lots, "Grinder Scalp Sell")
-                opened = True
-        else:
-            # Modo Surfer (tendencia) - ADX alto
-            if close_m5 > ma_m5 and rsi < 70:
-                self.b.market_order(mt5.ORDER_TYPE_BUY, grinder_lots, "Grinder Surf Buy")
-                opened = True
-            elif close_m5 < ma_m5 and rsi > 30:
-                self.b.market_order(mt5.ORDER_TYPE_SELL, grinder_lots, "Grinder Surf Sell")
-                opened = True
-        if opened:
-            self.last_grinder_open = self.now
-
-    def _grinder_trailing(self):
-        if not self._p("grinder_use_trail"):
-            return
-        point = self.b.point()
-        digits = self.b.digits()
-        trail_start = int(self._p("grinder_trail_start"))
-        trail_dist = int(self._p("grinder_trail_dist"))
-        turbo_trig = int(self._p("grinder_turbo_trig"))
-        turbo_dist = int(self._p("grinder_turbo_dist"))
-
-        for p in self.b.positions():
-            if not self._is_grinder(p):
-                continue
-            if p.type == mt5.POSITION_TYPE_BUY:
-                points = (p.price_current - p.price_open) / point
-            else:
-                points = (p.price_open - p.price_current) / point
-
-            active_dist = trail_dist
-            if points >= turbo_trig:
-                active_dist = turbo_dist
-
-            if points >= trail_start:
-                update = False
-                if p.type == mt5.POSITION_TYPE_BUY:
-                    new_sl = round(p.price_current - active_dist * point, digits)
-                    if new_sl > p.price_open and (p.sl == 0 or new_sl > p.sl):
-                        update = True
-                else:
-                    new_sl = round(p.price_current + active_dist * point, digits)
-                    if new_sl < p.price_open and (p.sl == 0 or new_sl < p.sl):
-                        update = True
-                if update:
-                    self.b.modify_sl(p, new_sl)
 
     # ==============================================================
     # PROFIT BANKING (Unwind)
@@ -706,8 +588,7 @@ class SentinelEngine:
             return
         if self.spread_high or self.vol_breaker or self.close_only:
             return  # no abrir martingala con spread alto, vela anomala (VCB) ni en close-only
-        # Op3 / cesta = solo posiciones core (RF-I: excluye scalps del grinder)
-        positions = [p for p in self.b.positions() if not self._is_grinder(p)]
+        positions = self.b.positions()
         if len(positions) < 3:
             return
         if self._rescue_leg_count() >= int(self._p("max_rescue_legs")):
@@ -801,7 +682,7 @@ class SentinelEngine:
         self.now = tick.time
 
         df15 = self._rates(config.TIMEFRAME_CORE)
-        df5 = self._rates(config.TIMEFRAME_GRINDER)
+        df5 = self._rates(config.TIMEFRAME_M5)
         dfh4 = self._rates(config.TIMEFRAME_STRUCT)
         if df15 is None or df5 is None or dfh4 is None:
             return False
@@ -813,10 +694,8 @@ class SentinelEngine:
         self.ema0 = float(indicators.ema(df15["close"], int(self._p("fast_ma"))).iloc[-1])
         self.rsi0 = float(indicators.rsi(df15).iloc[-1])
 
-        self.g_ema0 = float(indicators.ema(df5["close"], 50).iloc[-1])
-        self.g_adx0 = float(indicators.adx(df5).iloc[-1])
-        self.g_rsi0 = float(indicators.rsi(df5).iloc[-1])
-        self.m5_close0 = float(df5["close"].iloc[-1])
+        # M5 solo para confirmar el momentum de la entrada (_m5_momentum). Los
+        # indicadores M5 del grinder (EMA/ADX/RSI) se fueron con el a su proceso.
         self.m5_open1 = float(df5["open"].iloc[-2])
         self.m5_close1 = float(df5["close"].iloc[-2])
 
@@ -852,7 +731,7 @@ class SentinelEngine:
         self._build_hud(struct_h4, signal_m15, is_friday_mode, is_weekly_start_wait)
 
         # Spread: NO congela la gestion (RF-A). Solo bloquea aperturas que
-        # ANADEN riesgo (entrada, recovery, rescate, grinder). Cierres, trailing,
+        # ANADEN riesgo (entrada, recovery, rescate). Cierres, trailing,
         # healer y profit banking corren igual; el Hedge (proteccion) tambien.
         self.spread_high = self.b.spread() > int(self._p("inp_max_spread"))
 
@@ -871,12 +750,11 @@ class SentinelEngine:
         # Subsistemas transversales
         self._check_healing()
         self._profit_banking()
-        self._grinder_trailing()
 
-        positions = self.b.positions()
-        core_positions = [p for p in positions if not self._is_grinder(p)]
-        my_positions = len(positions)
-        core_count = len(core_positions)  # RF-I: estado por posiciones core (sin grinder)
+        # Todas las posiciones del magic son cesta core: el grinder salio del
+        # Sentinel a su propio proceso (bot/strategy_m5.py), con su propio magic.
+        core_positions = self.b.positions()
+        my_positions = core_count = len(core_positions)
 
         # Red de seguridad de ciclo (B/C): si NO hay cesta core (cerro por _close_all,
         # stop-out del broker o SL), reinicia el realizado del ciclo y marca rebaseline
@@ -1030,11 +908,9 @@ class SentinelEngine:
                         and self.gov.can_open(recovery_lots, rtype, budget.KIND_ADDITIVE)):
                     self.b.market_order(rtype, recovery_lots, label)
 
-        # --- ESTADO 3+: SENTINEL + BIO-REACTOR + TRAILING OP3 ---
+        # --- ESTADO 3+: SENTINEL + TRAILING OP3 ---
         elif core_count >= 3:
             self._check_rescue()            # RF-D: corre con >=3 core (no solo ==3)
-            if core_count >= 4:
-                self._run_grinder()
 
             if self._p("use_op3_trail"):
                 op3 = None

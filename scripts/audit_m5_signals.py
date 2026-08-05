@@ -68,7 +68,7 @@ def main():
     sym = mt5.symbol_info(config.SYMBOL)
     point = sym.point
 
-    df5 = _rates(config.TIMEFRAME_GRINDER, args.barras)
+    df5 = _rates(config.TIMEFRAME_M5, args.barras)
     df15 = _rates(config.TIMEFRAME_CORE, max(2000, args.barras // 3))
 
     ema = indicators.ema(df5["close"], DEFAULTS["m5_ma_period"])

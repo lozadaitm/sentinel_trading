@@ -1,7 +1,7 @@
 """BacktestEngine: SentinelEngine real con el feed de datos sobrescrito.
 
 Solo se reemplazan los DOS seams de datos (_fetch_tick y _rates). Toda la logica
-de trading (estados, healer, banking, rescate, grinder, trailing) es heredada sin
+de trading (estados, healer, banking, rescate, trailing) es heredada sin
 cambios -> el backtest prueba el mismo codigo que el bot en vivo.
 """
 

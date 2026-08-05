@@ -13,7 +13,7 @@ import pandas as pd
 from bot import config
 
 M15 = config.TIMEFRAME_CORE
-M5 = config.TIMEFRAME_GRINDER
+M5 = config.TIMEFRAME_M5
 H4 = config.TIMEFRAME_STRUCT
 
 _BAR_SECONDS = {M15: 15 * 60, M5: 5 * 60, H4: 4 * 60 * 60}

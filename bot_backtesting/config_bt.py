@@ -32,7 +32,7 @@ INITIAL_BALANCE = 5000.0
 # Plantillas de nombre de archivo por timeframe dentro del data dir.
 DATA_FILES = {
     config.TIMEFRAME_CORE:    "{symbol}_M15.csv",
-    config.TIMEFRAME_GRINDER: "{symbol}_M5.csv",
+    config.TIMEFRAME_M5: "{symbol}_M5.csv",
     config.TIMEFRAME_STRUCT:  "{symbol}_H4.csv",
 }
 

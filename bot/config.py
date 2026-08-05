@@ -126,7 +126,7 @@ MT5_SERVER = os.environ.get("MT5_SERVER", "")   # servidor del broker
 MT5_PASSWORD = os.environ.get("MT5_PASSWORD", "")
 
 TIMEFRAME_CORE = mt5.TIMEFRAME_M15
-TIMEFRAME_GRINDER = mt5.TIMEFRAME_M5
+TIMEFRAME_M5 = mt5.TIMEFRAME_M5
 TIMEFRAME_STRUCT = mt5.TIMEFRAME_H4
 
 # Frecuencia del bucle principal (segundos). 1 = comportamiento tipo OnTick.

@@ -16,7 +16,7 @@ import pandas as pd
 from bot import config
 
 _TF = [(config.TIMEFRAME_CORE, 15 * 60, "M15"),
-       (config.TIMEFRAME_GRINDER, 5 * 60, "M5"),
+       (config.TIMEFRAME_M5, 5 * 60, "M5"),
        (config.TIMEFRAME_STRUCT, 4 * 60 * 60, "H4")]
 
 

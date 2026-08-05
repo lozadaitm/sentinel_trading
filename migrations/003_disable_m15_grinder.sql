@@ -1,46 +1,44 @@
 -- ==================================================================
--- 003_disable_m15_grinder.sql  |  Apagar el grinder embebido en el Sentinel
+-- 003_disable_m15_grinder.sql  |  OBSOLETA. No ejecutar.
 -- ==================================================================
--- APLICAR SOLO cuando la instancia M5 este lista para arrancar.
--- Es un flag de RUNTIME: revertir es otro UPDATE, no un despliegue.
+-- Esta migracion apagaba el flag `use_grinder` de la fila bot_id='m15'.
+-- Ya no hace falta: el scalper embebido se ELIMINO del codigo del Sentinel
+-- (bot/strategy.py), no solo se desactivo. Ver el commit
+-- "refactor(m15): extrae por completo el grinder del Sentinel".
 --
--- QUE HACE
---   El Sentinel M15 lleva dentro un grinder M5 degradado que solo se activa
---   con la cesta en core>=4. Se sustituye por el motor M5 independiente
---   (bot/strategy_m5.py), que es el port fiel del EA SmartCut v13.02.
+-- `bot_config.use_grinder` queda como columna muerta para la fila m15: el
+-- motor ya no la lee. Se conserva la columna para no romper el dashboard ni
+-- el historico; se puede borrar mas adelante con un ALTER TABLE ... DROP.
 --
--- CONSECUENCIA ESPERADA (no es un efecto lateral: es el objetivo)
---   El presupuesto del Smart Healer BAJA. Sus amputaciones se financiaban con
---   los deals ganadores del grinder, porque compartian magic:
---       _check_healing() filtra por d.magic == self.b.magic
---   Con el M5 en su propio magic, esos verdes dejan de alimentar al Healer.
---   Dado docs/memory/healer-unwind-hedge-cascade.md (Healer + Unwind
---   desarmando el hedge = los dos blowups), esto es DE-RISKING DELIBERADO.
+-- ------------------------------------------------------------------
+-- LO QUE SIGUE ABIERTO Y SI IMPORTA: a que apunta el Healer.
+-- ------------------------------------------------------------------
+-- Quitar el grinder le quita al Healer su principal fuente de presupuesto
+-- dentro de un ciclo perdedor (los bankings del Unwind estan congelados
+-- mientras el ciclo va en negativo). Eso lo deja casi inerte, pero es una
+-- mitigacion INDIRECTA: no arregla su seleccion de objetivo.
 --
--- QUE MONITORIZAR DURANTE 2 SEMANAS
---   1. Amputaciones por semana:
---        SELECT date_trunc('week', created_at) AS semana, count(*)
---          FROM bot_logs
---         WHERE user_id = '<USER_UUID>' AND bot_id = 'm15' AND log_type = 'HEALER'
---         GROUP BY 1 ORDER BY 1 DESC;
---   2. P&L por ciclo (log_type = 'EXITO').
---   3. Profundidad maxima de cesta (posiciones core simultaneas).
+-- Evidencia de produccion (user e8d840ab-…, 21 amputaciones):
+--   16 de 21 (76%) mordieron un `Hedge Lock`, a 0.01 lotes por vez.
+--   El ticket #1609321275 (Hedge Lock) fue amputado 12 veces en 2h30m.
+--   El ticket #1599444276 (Hedge Lock BUY @ 4046.36) se mordio con el
+--   precio en ~3985: la cesta iba a favor y el hedge era el UNICO leg
+--   contra-direccional, luego el minimo por construccion.
 --
--- LIMPIEZA DE CODIGO
---   Solo DESPUES de confirmar estabilidad: borrar _run_grinder,
---   _grinder_trailing y _is_grinder de bot/strategy.py, junto con sus
---   exclusiones en _net_exposure, _apply_healing, _check_rescue y core_count.
---   Eso elimina de paso la identidad fragil por comment con fallback al
---   lote 0.05 (cualquier posicion de ese tamaño se disfrazaba de grinder).
+-- Causa: `_apply_healing` es un argmin(profit+swap) sin noción de rol. No
+-- distingue entrada, cobertura, recovery ni rescate. Y como recovery/rescate
+-- abren del lado de Op1, la cesta acumula N legs de un lado y UNO solo del
+-- otro -> en cuanto la tendencia acompaña, el hedge es el peor leg siempre.
+--
+-- Ademas cada amputacion realiza en perdida ~90% del verde acumulado
+-- (`budget = profit_available * 0.90`), asi que convertia los +30/+35 que
+-- bancaba el Unwind en perdida realizada casi 1:1.
+--
+-- Arreglo pendiente de decision: prohibir al Healer amputar el leg de
+-- cobertura mientras exista un perdedor core desnudo del lado opuesto.
+-- Corresponde a la "via (d) no implementada" de
+-- docs/memory/healer-unwind-hedge-cascade.md. No choca con "no stops duros":
+-- no es poner un stop, es no cerrar la cobertura.
 -- ==================================================================
 
-UPDATE public.bot_config
-   SET use_grinder = false,
-       updated_at  = NOW()
- WHERE user_id = '<USER_UUID>'
-   AND bot_id  = 'm15';
-
--- Reversion:
--- UPDATE public.bot_config
---    SET use_grinder = true, updated_at = NOW()
---  WHERE user_id = '<USER_UUID>' AND bot_id = 'm15';
+-- (sin sentencias: nada que ejecutar)
