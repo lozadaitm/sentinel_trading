@@ -17,6 +17,10 @@ descubrir en vivo:
   [10]    Hedge Lock: si el broker rechaza, el SL SOBREVIVE y se loguea ERROR
           (antes se limpiaba el SL antes de cubrir y la posicion quedaba
           desnuda en silencio).
+  [11]    Sentinel M15: Op1 abre SIN SL ni TP -- su red es el Hedge Lock, no un
+          stop -- y el unico SL que llega a tener lo pone el Smart Trail SIEMPRE
+          por encima de la entrada. Ademas el VCB sigue bloqueando la entrada en
+          velas anomalas y sigue siendo desactivable por config.
 
 Uso:  python -m tests.test_m5_and_budget      (desde la raiz del repo)
 """
@@ -375,6 +379,88 @@ def run():
     check("con margen 0 y ML 120%, el M15 NO abre aditivas",
           not eh3.gov.can_open(0.5, mt5.ORDER_TYPE_BUY, budget.KIND_ADDITIVE))
     check("...pero el Hedge Lock si entra", eh3._open_hedge(op1c) is True)
+
+    # ---------- 11. M15: Op1 sin SL + VCB intacto ----------
+    print("\n[11] Sentinel M15: Op1 sin SL, gestionada por Smart Trail")
+    from bot import indicators as _ind
+
+    class M15Engine(SentinelEngine):
+        """SentinelEngine con el feed sustituido (mismos seams que el backtest)."""
+        def __init__(self, broker, logger, df15, df5, dfh4):
+            super().__init__(broker, logger)
+            self._d15, self._d5, self._dh4 = df15, df5, dfh4
+        def _fetch_tick(self):
+            class T: time = 1_700_050_000
+            return T()
+        def _rates(self, timeframe, count=150, min_bars=60):
+            if timeframe == config.TIMEFRAME_STRUCT: return self._dh4.copy()
+            if timeframe == config.TIMEFRAME_GRINDER: return self._d5.copy()
+            return self._d15.copy()
+
+    def m15_engine(broker, logger, df15=None):
+        d15 = df15 if df15 is not None else series(n=300, start=3900, drift=0.20, noise=1.2, seed=7)
+        # El precio del broker debe ser coherente con las velas servidas, o el
+        # gate de pullback (distancia a la EMA) bloquea la entrada.
+        broker._price = float(d15["close"].iloc[-1])
+        return M15Engine(broker, logger, d15,
+                         series(n=300, start=3900, drift=0.07, noise=0.4, seed=8),
+                         series(n=300, start=3900, drift=1.5, noise=2.0, seed=9))
+
+    # La señal de entrada depende de fractales H4/M15; aqui se fuerza para
+    # aislar lo que se quiere probar: como se CONSTRUYE la orden de Op1.
+    _orig_h4, _orig_brk = _ind.get_h4_structure, _ind.check_m15_breakout
+    _ind.get_h4_structure = lambda df, use=True: 1
+    _ind.check_m15_breakout = lambda df: 1
+    try:
+        bm, lgm = FakeBroker(magic=config.MAGIC_M15), FakeLogger()
+        em = m15_engine(bm, lgm)
+        em.cfg = {}
+        em.on_tick()
+        check("Op1 abre", len(bm.orders) == 1, str(bm.orders)[:110])
+        if bm.orders:
+            check("Op1 abre SIN SL (la red es el Hedge Lock, no un stop)",
+                  bm.orders[0]["sl"] == 0.0, f"sl={bm.orders[0]['sl']}")
+            check("Op1 abre SIN TP", bm._pos[0].tp == 0.0)
+
+        # VCB: vela M15 en curso anomala -> bloquea la entrada, misma señal.
+        dfv = series(n=300, start=3900, drift=0.20, noise=1.2, seed=7)
+        i = dfv.index[-1]
+        atr_ref = float(_ind.atr(dfv, 14).iloc[-1])
+        dfv.loc[i, "high"] = dfv.loc[i, "close"] + atr_ref * 2.0
+        dfv.loc[i, "low"] = dfv.loc[i, "close"] - atr_ref * 2.0   # rango = 4.0 ATR > 2.8
+        bv, lgv = FakeBroker(magic=config.MAGIC_M15), FakeLogger()
+        ev = m15_engine(bv, lgv, dfv)
+        ev.cfg = {}
+        ev.on_tick()
+        check("VCB detecta la vela anomala", ev.vol_breaker is True)
+        check("VCB bloquea la entrada de Op1", len(bv.orders) == 0, str(bv.orders)[:110])
+        check("VCB loguea la transicion", any(t == "VCB" for t, _ in lgv.events))
+
+        # VCB desactivable por config, como antes.
+        bv2 = FakeBroker(magic=config.MAGIC_M15)
+        ev2 = m15_engine(bv2, FakeLogger(), dfv)
+        ev2.cfg = {"use_vol_breaker": False}
+        ev2.on_tick()
+        check("use_vol_breaker=False desactiva el VCB", ev2.vol_breaker is False)
+    finally:
+        _ind.get_h4_structure, _ind.check_m15_breakout = _orig_h4, _orig_brk
+
+    # Smart Trail: unica via por la que Op1 recibe un SL, y siempre en verde.
+    bt, lgt = FakeBroker(magic=config.MAGIC_M15), FakeLogger()
+    et = m15_engine(bt, lgt)
+    et.cfg = {}
+    et._compute_buffers()
+    atr_m15 = et._effective_atr()
+    op = FakePos(1, mt5.POSITION_TYPE_BUY, 0.2, 3900.0, 1_700_000_000, "SMC Buy Entry", config.MAGIC_M15)
+    op.price_open = bt._price
+    op.price_current = bt._price + atr_m15 * 1.6   # supera trail_activate = 1.0 ATR
+    bt._pos.append(op)
+    bt._price = op.price_current
+    et.on_tick()
+    print("     ATR M15=%.2f  precio=%.2f  SL=%.2f" % (atr_m15, op.price_current, op.sl))
+    check("Smart Trail arma el SL de Op1 en beneficio", op.sl > 0)
+    check("el SL del Smart Trail queda POR ENCIMA de la entrada (nunca es un stop de perdida)",
+          op.sl > op.price_open, f"{op.sl:.2f} > {op.price_open:.2f}")
 
     print("\n" + "=" * 60)
     if fails:
