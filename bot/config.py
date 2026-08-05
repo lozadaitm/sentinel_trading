@@ -49,6 +49,26 @@ SYMBOL = os.environ.get("SYMBOL", "XAUUSD+")   # sufijo del broker (XAUUSD.v, et
 MAGIC_NUMBER = int(os.environ.get("MAGIC_NUMBER", "100100"))
 ADMIN_USER_UUID = "81118671-d5ba-4d49-9fb3-4499b54a3d93"
 
+# ==================================================================
+# MULTI-BOT SOBRE UNA MISMA CUENTA
+# Un usuario puede correr varios motores (M15 Sentinel + M5 Grinder) contra
+# la MISMA cuenta MT5. Se distinguen por:
+#   - BOT_ID  -> discriminador de las filas en Supabase (bot_config, bot_state,
+#                bot_instances, bot_positions, bot_logs).
+#   - MAGIC   -> discriminador de las posiciones en el broker. Es lo que permite
+#                que cada proceso vea SOLO lo suyo (Broker.positions) y a la vez
+#                pueda leer la cesta del vecino (Broker.positions_of_magic).
+# ==================================================================
+BOT_ID = os.environ.get("BOT_ID", "m15")
+
+MAGIC_M15 = int(os.environ.get("MAGIC_M15", "100100"))
+MAGIC_M5 = int(os.environ.get("MAGIC_M5", "100200"))
+
+ALL_MAGICS = (MAGIC_M15, MAGIC_M5)
+# Magics de los OTROS bots de la cuenta: para calcular la reserva de proteccion
+# sin necesidad de IPC ni de pasar por la DB. Ver bot/budget.py.
+PEER_MAGICS = tuple(m for m in ALL_MAGICS if m != MAGIC_NUMBER)
+
 # Usuario que identifica la fila de bot_config/bot_instances a cargar.
 # = auth.users.id en Supabase. Se pasa por .env de la instancia.
 USER_ID = os.environ.get("USER_ID", ADMIN_USER_UUID)

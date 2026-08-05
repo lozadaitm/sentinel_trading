@@ -3,6 +3,11 @@
 El bot usa la service-role key (bypassa RLS) y filtra SIEMPRE por USER_ID.
 Multi-instancia: cada proceso lleva su USER_ID/SYMBOL en el entorno (.env).
 
+Multi-bot: un mismo usuario puede correr varios motores contra la MISMA cuenta
+(BOT_ID 'm15' = Sentinel, 'm5' = Grinder). Todas las consultas filtran ademas
+por BOT_ID para que los procesos no se pisen la config, el heartbeat ni el
+snapshot. Ver migrations/002_bot_id.sql.
+
 Diseño clave:
   - Resiliencia: cachea la ultima config buena; ante un hipo de red reusa la
     cache en vez de tumbar el motor (load_config/get_instance nunca lanzan).
@@ -61,6 +66,7 @@ class Database:
                 .select("*")
                 .eq("user_id", config.USER_ID)
                 .eq("symbol", config.SYMBOL)
+                .eq("bot_id", config.BOT_ID)
                 .eq("is_active", True)
                 .limit(1)
                 .execute()
@@ -91,6 +97,7 @@ class Database:
                 self.client.table("bot_instances")
                 .select("*")
                 .eq("user_id", config.USER_ID)
+                .eq("bot_id", config.BOT_ID)
                 .limit(1)
                 .execute()
             )
@@ -125,7 +132,7 @@ class Database:
         try:
             self.client.table("bot_instances").update(
                 {"bot_status": bot_status, "last_heartbeat": now_iso, "updated_at": now_iso}
-            ).eq("user_id", config.USER_ID).execute()
+            ).eq("user_id", config.USER_ID).eq("bot_id", config.BOT_ID).execute()
         except Exception:  # noqa: BLE001
             pass
 
@@ -145,6 +152,7 @@ class Database:
                 self.client.table("bot_state")
                 .select("initial_balance")
                 .eq("user_id", config.USER_ID)
+                .eq("bot_id", config.BOT_ID)
                 .limit(1)
                 .execute()
             )
@@ -162,6 +170,7 @@ class Database:
             return
         row = {
             "user_id": config.USER_ID,
+            "bot_id": config.BOT_ID,
             "symbol": symbol,
             "balance": float(balance),
             "equity": float(equity),
@@ -173,7 +182,7 @@ class Database:
             "updated_at": _utcnow_iso(),
         }
         try:
-            self.client.table("bot_state").upsert(row, on_conflict="user_id").execute()
+            self.client.table("bot_state").upsert(row, on_conflict="user_id,bot_id").execute()
         except Exception:  # noqa: BLE001
             pass
 
@@ -193,6 +202,7 @@ class Database:
                 self.client.table("bot_positions")
                 .select("ticket")
                 .eq("user_id", config.USER_ID)
+                .eq("bot_id", config.BOT_ID)
                 .eq("status", "OPEN")
                 .execute()
             )
@@ -212,6 +222,7 @@ class Database:
         now_iso = _utcnow_iso()
         for row in rows:
             row.setdefault("user_id", config.USER_ID)
+            row.setdefault("bot_id", config.BOT_ID)
             row["updated_at"] = now_iso
         try:
             self.client.table("bot_positions").upsert(rows, on_conflict="user_id,ticket").execute()
@@ -229,6 +240,7 @@ class Database:
         """
         row = {
             "user_id": config.USER_ID,
+            "bot_id": config.BOT_ID,
             "symbol": config.SYMBOL,
             "log_type": log_type,
             "message": message,

@@ -45,10 +45,10 @@ LOG_COLORS = {
     "OPERACION": "green", "HEALER": "magenta", "UNWIND": "yellow",
     "GRINDER": "blue", "SHADOW": "dim", "PROTECCION": "yellow",
     "ENTRADA": "bold green", "RECOVERY": "green", "RESCATE": "bold yellow",
-    "CIERRE": "green", "VCB": "bold red",
+    "CIERRE": "green", "VCB": "bold red", "BUDGET": "bold magenta",
 }
 
-PARAM_SKIP = {"id", "user_id", "updated_at"}
+PARAM_SKIP = {"id", "user_id", "bot_id", "updated_at"}
 
 HELP_HINT = "p=params   Up/Dn PgUp/PgDn=log   Fin=al vivo   q=salir"
 
@@ -249,18 +249,24 @@ def build_layout(layout, engine, log_buf, show_params, size, log_scroll=0):
         Layout(name="log", ratio=28),
     )
 
-    df = engine.df_m15
+    # El Sentinel publica df_m15; el motor M5 publica df_m5. Se grafica el
+    # timeframe operativo de cada uno.
+    df = getattr(engine, "df_m15", None)
+    tf_label = "M15"
+    if df is None:
+        df = getattr(engine, "df_m5", None)
+        tf_label = "M5"
     symbol = config.SYMBOL
     if show_params:
         layout["top"].split_row(Layout(name="chart", ratio=62), Layout(name="params", ratio=38))
         chart_w = int(width * 0.62) - 4
         layout["chart"].update(Panel(render_chart(df, symbol, chart_w, top_h - 2),
-                                     title=f"{symbol}  M15", border_style="cyan",
+                                     title=f"{symbol}  {tf_label}", border_style="cyan",
                                      subtitle=Text(HELP_HINT, style="dim")))
         layout["params"].update(render_params(engine.cfg))
     else:
         layout["top"].update(Panel(render_chart(df, symbol, width - 4, top_h - 2),
-                                   title=f"{symbol}  M15", border_style="cyan",
+                                   title=f"{symbol}  {tf_label}", border_style="cyan",
                                    subtitle=Text(HELP_HINT, style="dim")))
 
     user_label = getattr(engine, "user_email", None) or config.USER_ID
@@ -273,17 +279,18 @@ def build_layout(layout, engine, log_buf, show_params, size, log_scroll=0):
 # ------------------------------------------------------------------
 # Main
 # ------------------------------------------------------------------
-def run_tui():
+def run_tui(engine_cls=None):
+    """UI en vivo. `engine_cls` permite abrirla sobre el motor M5 (ver bot.tui_m5)."""
     botmain.disable_quickedit()
     console = Console()
     log_buf = LogBuffer()
 
-    logger = Logger(enable_file=True, file_name="Gold_HyperGrinder_v20",
+    logger = Logger(enable_file=True, file_name=botmain._log_file_name(),
                     symbol=config.SYMBOL, console_print=False)
     logger.add_sink(log_buf.add)
 
     try:
-        db, broker, engine, logger = botmain.setup(logger=logger)
+        db, broker, engine, logger = botmain.setup(logger=logger, engine_cls=engine_cls)
     except Exception as e:  # noqa: BLE001
         console.print(f"[bold red]Error de arranque:[/] {e}")
         return

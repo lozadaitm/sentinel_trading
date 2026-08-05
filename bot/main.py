@@ -67,8 +67,23 @@ def _mt5_init_kwargs():
     return kw
 
 
-def setup(logger=None):
-    """Inicializa MT5, DB, broker y motor. Devuelve (db, broker, engine, logger)."""
+def _log_file_name():
+    """Nombre del CSV local. El M15 conserva el historico; los demas bots
+    escriben su propio archivo para no mezclar dos motores en un mismo log."""
+    if config.BOT_ID == "m15":
+        return "Gold_HyperGrinder_v20"
+    return f"Gold_{config.BOT_ID.upper()}"
+
+
+def setup(logger=None, engine_cls=None):
+    """Inicializa MT5, DB, broker y motor. Devuelve (db, broker, engine, logger).
+
+    `engine_cls` permite reusar todo el arranque con otro motor (M5Engine) sin
+    duplicar la conexion, la DB ni el bucle. Por defecto, el Sentinel M15.
+    """
+    if engine_cls is None:
+        engine_cls = SentinelEngine
+
     if not mt5.initialize(**_mt5_init_kwargs()):
         raise RuntimeError(f"No se pudo inicializar MetaTrader 5: {mt5.last_error()}")
 
@@ -79,12 +94,12 @@ def setup(logger=None):
     db.connect()  # conecta a Supabase + arranca el flusher de logs
 
     if logger is None:
-        logger = Logger(enable_file=True, file_name="Gold_HyperGrinder_v20", symbol=config.SYMBOL)
+        logger = Logger(enable_file=True, file_name=_log_file_name(), symbol=config.SYMBOL)
 
     logger.add_sink(db.log_sink)  # encola cada write() -> bot_logs (no bloquea; sin pisar otros sinks)
 
     broker = Broker(logger, shadow=config.SHADOW_MODE)
-    engine = SentinelEngine(broker, logger)
+    engine = engine_cls(broker, logger)
     engine.init_history_cursor()
     engine.user_email = db.get_user_email()  # una vez al arrancar (para identificar la instancia)
 
@@ -106,7 +121,9 @@ def setup(logger=None):
         pass
 
     who = engine.user_email or config.USER_ID
-    logger.write("SYSTEM", f"HYPER GRINDER v20.0 (Python) INICIADO. user={who} symbol={config.SYMBOL}",
+    logger.write("SYSTEM",
+                 f"{engine_cls.__name__} INICIADO. bot_id={config.BOT_ID} magic={config.MAGIC_NUMBER} "
+                 f"user={who} symbol={config.SYMBOL}",
                  balance=broker.account_balance())
     if config.SHADOW_MODE:
         logger.write("SYSTEM", "MODO SOMBRA activo: no se enviaran ordenes reales; solo se loguean decisiones.")
@@ -271,9 +288,9 @@ def shutdown(db):
     mt5.shutdown()
 
 
-def run():
+def run(engine_cls=None):
     disable_quickedit()
-    db, broker, engine, logger = setup()
+    db, broker, engine, logger = setup(engine_cls=engine_cls)
     try:
         trading_loop(db, engine, logger)
     except KeyboardInterrupt:

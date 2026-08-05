@@ -85,6 +85,9 @@ class SimBroker:
     def spread(self):
         return self.specs["spread_points"]
 
+    def stops_level(self):
+        return self.specs.get("stops_level", 0)
+
     def bid(self):
         return self.market.current_price
 
@@ -137,11 +140,43 @@ class SimBroker:
     def positions(self):
         return list(self._positions)
 
-    def check_free_margin(self, lots, order_type):
+    def positions_all(self):
+        """En el sim solo existe un bot: todas las posiciones son suyas."""
+        return list(self._positions)
+
+    def positions_of_magic(self, magic):
+        return [p for p in self._positions if p.magic == magic]
+
+    def order_margin(self, order_type, lots):
+        if lots <= 0:
+            return 0.0
         cs = self.specs["contract_size"]
         lev = self.specs["leverage"]
         price = self.ask() if order_type == mt5.ORDER_TYPE_BUY else self.bid()
-        margin_required = lots * cs * price / lev
+        return lots * cs * price / lev
+
+    def magic_margin(self, magic):
+        total = 0.0
+        for p in self.positions_of_magic(magic):
+            otype = (mt5.ORDER_TYPE_BUY if p.type == mt5.POSITION_TYPE_BUY
+                     else mt5.ORDER_TYPE_SELL)
+            total += self.order_margin(otype, p.volume)
+        return total
+
+    def own_margin(self):
+        return self.magic_margin(self.magic)
+
+    def stop_out_levels(self):
+        return (self.specs.get("margin_call_level", 100.0),
+                self.specs.get("stop_out_level", 50.0))
+
+    def hedged_margin_rate(self):
+        return (self.specs.get("margin_hedged", 0.0), False)
+
+    def check_free_margin(self, lots, order_type):
+        margin_required = self.order_margin(order_type, lots)
+        if margin_required <= 0:
+            return False
         return self.margin_free() >= margin_required * 1.1
 
     # -------------------- ordenes --------------------
@@ -150,12 +185,14 @@ class SimBroker:
         self._next_ticket += 1
         return t
 
-    def market_order(self, order_type, lots, comment):
+    def market_order(self, order_type, lots, comment, sl=0.0, tp=0.0):
         lots = float(lots)
         ptype = mt5.POSITION_TYPE_BUY if order_type == mt5.ORDER_TYPE_BUY else mt5.POSITION_TYPE_SELL
         price = self.ask() if order_type == mt5.ORDER_TYPE_BUY else self.bid()
         pos = SimPosition(self._new_ticket(), ptype, lots, price,
                           self.market.current_time, comment, self.magic)
+        pos.sl = float(sl)
+        pos.tp = float(tp)
         self._positions.append(pos)
         self.balance -= lots * self.specs["commission_per_lot"]  # comision de apertura
         return SimpleNamespace(retcode=mt5.TRADE_RETCODE_DONE, order=pos.ticket)

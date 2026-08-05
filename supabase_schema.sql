@@ -20,14 +20,16 @@
 --   last_heartbeat -> lo escribe el BOT cada N s (online/offline en la UI)
 -- ==================================================================
 CREATE TABLE IF NOT EXISTS public.bot_instances (
-    user_id        UUID        PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    user_id        UUID        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    bot_id         TEXT        NOT NULL DEFAULT 'm15',  -- 'm15' Sentinel | 'm5' Grinder
     label          TEXT,                                    -- "Cuenta Vantage #123"
     account_login  BIGINT,                                  -- login MT5/Vantage (informativo)
     is_active      BOOLEAN     NOT NULL DEFAULT false,      -- señal ON/OFF del usuario
     bot_status     TEXT        NOT NULL DEFAULT 'STOPPED',  -- lo reporta el bot
     last_heartbeat TIMESTAMPTZ,                             -- lo reporta el bot
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (user_id, bot_id)
 );
 
 -- ==================================================================
@@ -38,6 +40,7 @@ CREATE TABLE IF NOT EXISTS public.bot_config (
     id                      BIGSERIAL PRIMARY KEY,
     user_id                 UUID         NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
     symbol                  TEXT         NOT NULL,
+    bot_id                  TEXT         NOT NULL DEFAULT 'm15',  -- motor dueño de esta fila
     is_active               BOOLEAN      NOT NULL DEFAULT true,   -- incluye/excluye este simbolo
     status                  TEXT         NOT NULL DEFAULT 'INACTIVE', -- observacional (compat)
     updated_at              TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
@@ -132,7 +135,7 @@ CREATE TABLE IF NOT EXISTS public.bot_config (
     log_file_name           TEXT             DEFAULT 'Gold_HyperGrinder_v20',
     cooldown_seconds        INTEGER          DEFAULT 10,
 
-    UNIQUE (user_id, symbol)
+    UNIQUE (user_id, symbol, bot_id)
 );
 
 -- ==================================================================
@@ -142,6 +145,7 @@ CREATE TABLE IF NOT EXISTS public.bot_config (
 CREATE TABLE IF NOT EXISTS public.bot_logs (
     id          BIGSERIAL    PRIMARY KEY,
     user_id     UUID             NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    bot_id      TEXT             NOT NULL DEFAULT 'm15',
     symbol      TEXT             NOT NULL,
     log_type    TEXT             NOT NULL,
     message     TEXT             NOT NULL,
@@ -163,7 +167,8 @@ CREATE INDEX IF NOT EXISTS idx_bot_logs_user_symbol_ts
 --   (se reusa entre restarts). Ver bot/db.py::report_state.
 -- ==================================================================
 CREATE TABLE IF NOT EXISTS public.bot_state (
-    user_id         UUID        PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    user_id         UUID        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    bot_id          TEXT        NOT NULL DEFAULT 'm15',
     symbol          TEXT,
     balance         DOUBLE PRECISION,
     equity          DOUBLE PRECISION,
@@ -172,7 +177,8 @@ CREATE TABLE IF NOT EXISTS public.bot_state (
     floating_pnl    DOUBLE PRECISION,
     open_positions  INTEGER,
     initial_balance DOUBLE PRECISION,
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (user_id, bot_id)
 );
 
 -- ==================================================================
@@ -187,6 +193,7 @@ CREATE TABLE IF NOT EXISTS public.bot_state (
 CREATE TABLE IF NOT EXISTS public.bot_positions (
     id             BIGSERIAL   PRIMARY KEY,
     user_id        UUID        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    bot_id         TEXT        NOT NULL DEFAULT 'm15',
     ticket         BIGINT      NOT NULL,
     symbol         TEXT,
     position_type  TEXT,                    -- BUY | SELL

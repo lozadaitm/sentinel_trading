@@ -7,3 +7,4 @@
 - [Presupuesto Healer acumulado](healer-budget-accumulates-across-cycles.md) — cursor congelado en core<3 acumula verdes cross-ciclo; por eso amputa OP1 en rojo tras rachas ganadoras
 - [Logging: taxonomía y ticket](logging-taxonomy-and-ticket.md) — log_types de bot_logs, columna ticket, aperturas en broker vs cierres en strategy; drift ts/created_at
 - [Supabase + multi-instancia](supabase-multi-instance-model.md) — 1 proceso=1 usuario=1 cuenta; service-role bypassa RLS; is_active=false es close-only (no pause duro)
+- [Multi-bot: gobierno de margen](multi-bot-margin-governance.md) — M15 senior con Hedge Lock inbloqueable, M5 junior cede margen; coordinación vía magics en MT5, no por DB

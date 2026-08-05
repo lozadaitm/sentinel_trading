@@ -14,7 +14,7 @@ import datetime
 import MetaTrader5 as mt5
 import pandas as pd
 
-from . import config, indicators
+from . import budget, config, indicators
 
 # Defaults = valores input del MQL5 (fallback si falta la columna en bot_config)
 DEFAULTS = {
@@ -51,6 +51,11 @@ DEFAULTS = {
     "max_net_lots": 1.0,              # tope DURO de exposicion neta core (long-short); 0 = desactivado
     "max_rescue_legs": 3,             # cap de legs de Op4 por ciclo (acota el martingala)
     "use_recovery_h4_gate": True,     # no promediar (recovery/rescue) contra la estructura H4 confirmada
+    # --- Gobierno de margen (convivencia con el bot M5; ver bot/budget.py) ---
+    "equity_weight": 0.80,            # fraccion del equity que dimensiona el lote de ESTE bot
+    "margin_cap_pct": 60.0,           # techo de margen propio, en % del equity
+    "ml_no_add": 200.0,               # bajo este margin level no se abren aditivas (el hedge sigue)
+    "ml_flatten": 0.0,                # el senior nunca se auto-liquida: lo hace el M5
 }
 
 _LOT_EPS = 1e-8
@@ -70,6 +75,13 @@ class SentinelEngine:
         self.log = logger
         self.cfg = {}
         self.hud = {}  # snapshot read-only publicado cada tick para la TUI
+
+        # Gobierno de margen. Rol SENIOR: este motor no reserva margen para
+        # nadie y sus protectoras (Hedge Lock) son inbloqueables. Es el bot M5
+        # quien cede. Lee la config vigente por referencia (main la refresca).
+        self.gov = budget.MarginGovernor(
+            broker, lambda: self.cfg, budget.ROLE_SENIOR,
+            peer_magics=config.PEER_MAGICS, logger=logger)
 
         # Estado (globals del MQL5)
         self.last_recovery_close_time = 0
@@ -204,7 +216,10 @@ class SentinelEngine:
     # Lotaje y cierre total
     # ==============================================================
     def _calculate_lots(self, is_recovery):
-        equity = self.b.account_equity()
+        # Equity PONDERADO por el peso de este bot: con dos motores sobre la
+        # misma cuenta, dimensionar contra el equity completo haria que ambos
+        # escalasen sobre el mismo capital (doble conteo). Ver bot/budget.py.
+        equity = self.gov.sizing_equity()
         base_risk = float(self._p("base_risk"))
         ratio = equity / base_risk if base_risk else 0.0
         lots = ratio * float(self._p("base_lots"))
@@ -263,6 +278,48 @@ class SentinelEngine:
             return self.m5_close1 > self.m5_open1
         if order_type == mt5.ORDER_TYPE_SELL:
             return self.m5_close1 < self.m5_open1
+        return True
+
+    # ==============================================================
+    # HEDGE LOCK (orden protectora)
+    # ==============================================================
+    def _open_hedge(self, p):
+        """Abre el Hedge Lock y SOLO limpia el SL si el hedge quedo confirmado.
+
+        El orden es critico. Antes se hacia `modify_sl(p, 0)` ANTES de intentar
+        cubrir, de modo que un rechazo (margen insuficiente, retcode del broker)
+        dejaba la posicion DESNUDA: sin SL y sin cobertura, en silencio. El M15
+        no lleva SL catastrofico por diseño (ver docs/memory/bot-design-constraints),
+        asi que el hedge es la unica red que congela la perdida: si no entra, el
+        SL previo debe sobrevivir y hay que avisar.
+
+        Es una orden PROTECTORA: no se pre-filtra por margen ni por ningun tope
+        de presupuesto. Se intenta siempre y manda el broker; si rechaza, se
+        loguea el retcode real y el bucle reintenta en el siguiente tick.
+        """
+        hedge_type = (mt5.ORDER_TYPE_SELL if p.type == mt5.POSITION_TYPE_BUY
+                      else mt5.ORDER_TYPE_BUY)
+        res = self.b.market_order(hedge_type, p.volume, "Hedge Lock")
+
+        # En SHADOW_MODE market_order devuelve None a proposito (no envia nada):
+        # se trata como exito para no ensuciar el log con errores fantasma.
+        ok = self.b.shadow or (
+            res is not None and getattr(res, "retcode", None) == mt5.TRADE_RETCODE_DONE
+        )
+        if not ok:
+            rc = getattr(res, "retcode", "sin respuesta del broker")
+            self.log.write(
+                "ERROR",
+                f"Hedge Lock FALLIDO sobre ticket #{p.ticket} ({p.volume:.2f} lotes). "
+                f"retcode={rc}. Margen libre: {self.b.margin_free():.2f}. "
+                f"SL preservado; se reintenta en el proximo tick.",
+                p.price_current, p.volume, self.b.account_balance(), ticket=p.ticket)
+            return False
+
+        # Cobertura confirmada: recien ahora es seguro soltar el SL para que el
+        # par Op1+Hedge quede congelado y lo gestionen los subsistemas de cesta.
+        if p.sl != 0:
+            self.b.modify_sl(p, 0)
         return True
 
     # ==============================================================
@@ -326,8 +383,9 @@ class SentinelEngine:
             otype = mt5.ORDER_TYPE_BUY
 
         lots = self._calculate_lots(False)
-        margin_ok = self.b.check_free_margin(lots, otype)
-        gates.append(("Margen libre", f"{self.b.margin_free():.0f}", f"req {lots:.2f} lot", margin_ok))
+        margin_ok = self.gov.probe(lots, otype, budget.KIND_ADDITIVE)
+        gates.append(("Presupuesto", self.gov.last_block or f"{self.b.margin_free():.0f} libre",
+                      f"req {lots:.2f} lot", margin_ok))
 
         if is_friday_mode:
             gates.append(("Gate viernes", "ON", "OFF", False))
@@ -525,7 +583,7 @@ class SentinelEngine:
             return  # anti-churn: respeta cooldown tras el ultimo grinder
         if (self.atr0 / self.b.point()) < int(self._p("grinder_min_atr_points")):
             return  # mercado sin volatilidad: no scalpear
-        if not self.b.check_free_margin(grinder_lots, mt5.ORDER_TYPE_BUY):
+        if not self.gov.can_open(grinder_lots, mt5.ORDER_TYPE_BUY, budget.KIND_ADDITIVE):
             return
 
         # B. Entrada SmartCut M5
@@ -705,7 +763,7 @@ class SentinelEngine:
                     signal = True
             if (signal and self._h4_gate_ok(mt5.ORDER_TYPE_SELL)
                     and self._net_cap_ok(vol_op3, mt5.ORDER_TYPE_SELL)
-                    and self.b.check_free_margin(vol_op3, mt5.ORDER_TYPE_SELL)):
+                    and self.gov.can_open(vol_op3, mt5.ORDER_TYPE_SELL, budget.KIND_ADDITIVE)):
                 self.b.market_order(mt5.ORDER_TYPE_SELL, vol_op3, comment)
                 self.last_rescue_time = self.now
         elif type_op3 == mt5.POSITION_TYPE_BUY:
@@ -717,7 +775,7 @@ class SentinelEngine:
                     signal = True
             if (signal and self._h4_gate_ok(mt5.ORDER_TYPE_BUY)
                     and self._net_cap_ok(vol_op3, mt5.ORDER_TYPE_BUY)
-                    and self.b.check_free_margin(vol_op3, mt5.ORDER_TYPE_BUY)):
+                    and self.gov.can_open(vol_op3, mt5.ORDER_TYPE_BUY, budget.KIND_ADDITIVE)):
                 self.b.market_order(mt5.ORDER_TYPE_BUY, vol_op3, comment)
                 self.last_rescue_time = self.now
 
@@ -901,11 +959,11 @@ class SentinelEngine:
             lots = self._calculate_lots(False)
             if struct_h4 >= 0 and signal_m15 == 1 and self._is_price_good_entry(mt5.ORDER_TYPE_BUY):
                 if self.rsi0 < int(self._p("entry_rsi_max")):
-                    if self.b.check_free_margin(lots, mt5.ORDER_TYPE_BUY):
+                    if self.gov.can_open(lots, mt5.ORDER_TYPE_BUY, budget.KIND_ADDITIVE):
                         self.b.market_order(mt5.ORDER_TYPE_BUY, lots, "SMC Buy Entry")
             elif struct_h4 <= 0 and signal_m15 == -1 and self._is_price_good_entry(mt5.ORDER_TYPE_SELL):
                 if self.rsi0 > int(self._p("entry_rsi_min")):
-                    if self.b.check_free_margin(lots, mt5.ORDER_TYPE_SELL):
+                    if self.gov.can_open(lots, mt5.ORDER_TYPE_SELL, budget.KIND_ADDITIVE):
                         self.b.market_order(mt5.ORDER_TYPE_SELL, lots, "SMC Sell Entry")
 
         # --- ESTADO 1: HEDGE MONITOR ---
@@ -934,13 +992,7 @@ class SentinelEngine:
             active_hedge_dist = max(float(self._p("hedge_dist")), dynamic_dist)
 
             if loss_pts >= active_hedge_dist:
-                self.b.modify_sl(p, 0)  # limpia SL antes de cubrir
-                if p.type == mt5.POSITION_TYPE_BUY:
-                    if self.b.check_free_margin(p.volume, mt5.ORDER_TYPE_SELL):
-                        self.b.market_order(mt5.ORDER_TYPE_SELL, p.volume, "Hedge Lock")
-                else:
-                    if self.b.check_free_margin(p.volume, mt5.ORDER_TYPE_BUY):
-                        self.b.market_order(mt5.ORDER_TYPE_BUY, p.volume, "Hedge Lock")
+                self._open_hedge(p)
 
         # --- ESTADO 2: RECOVERY ---
         elif core_count == 2:
@@ -975,7 +1027,7 @@ class SentinelEngine:
                 else:
                     rtype = None
                 if (rtype is not None and self._net_cap_ok(recovery_lots, rtype)
-                        and self.b.check_free_margin(recovery_lots, rtype)):
+                        and self.gov.can_open(recovery_lots, rtype, budget.KIND_ADDITIVE)):
                     self.b.market_order(rtype, recovery_lots, label)
 
         # --- ESTADO 3+: SENTINEL + BIO-REACTOR + TRAILING OP3 ---

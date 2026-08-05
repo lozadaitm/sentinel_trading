@@ -4,6 +4,7 @@
 # .env por instancia (credenciales Supabase + MT5 por usuario). NO se commitean.
 instances/*.env
 !instances/example.env
+!instances/example-m5.env
 
 # Intento previo (contiene credenciales y logica vieja)
 TRADING PYTHON.txt

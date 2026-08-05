@@ -14,8 +14,12 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$EnvFile,
 
-    # Modulo a ejecutar: bot.main (consola, default) o bot.tui (UI en vivo).
-    [string]$Module = "bot.main"
+    # Modulo a ejecutar. Si no se pasa, se toma MODULE del .env; si tampoco
+    # esta, bot.main (Sentinel M15, consola).
+    #   bot.main     -> Sentinel M15
+    #   bot.main_m5  -> Grinder M5
+    #   bot.tui      -> UI en vivo del Sentinel
+    [string]$Module = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -35,7 +39,13 @@ Get-Content $EnvFile | ForEach-Object {
     Set-Item -Path "Env:$key" -Value $val
 }
 
-Write-Host "Arrancando instancia: USER_ID=$env:USER_ID SYMBOL=$env:SYMBOL (modulo: $Module)" -ForegroundColor Cyan
+# Precedencia: -Module explicito > MODULE del .env > bot.main
+if ($Module -eq "") {
+    if ($env:MODULE) { $Module = $env:MODULE } else { $Module = "bot.main" }
+}
+
+$botId = if ($env:BOT_ID) { $env:BOT_ID } else { "m15" }
+Write-Host "Arrancando instancia: USER_ID=$env:USER_ID SYMBOL=$env:SYMBOL BOT_ID=$botId MAGIC=$env:MAGIC_NUMBER (modulo: $Module)" -ForegroundColor Cyan
 
 # Correr desde la raiz del proyecto (padre de scripts/).
 $projectRoot = Split-Path -Parent $PSScriptRoot
