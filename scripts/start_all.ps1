@@ -300,10 +300,10 @@ if ($SkipAudits) {
             Write-Ok "audit_margin -> $(Split-Path -Leaf $outMargin)"
 
             $texto = Get-Content $outMargin -Raw
-            foreach ($linea in (Select-String -Path $outMargin -Pattern "margin_hedged\s+:|stop out|margin call|apalancamiento").Line) {
+            foreach ($linea in (Select-String -Path $outMargin -Pattern "margin_hedged\s+:|stop out|margin call|apalancamiento|VEREDICTO:|escalera completa").Line) {
                 Write-Host "         $($linea.Trim())" -ForegroundColor DarkGray
             }
-            if ($texto -match "NO CABE") {
+            if ($texto -match "VEREDICTO: NO CABE") {
                 Write-Warn "el peor caso de la escalera NO CABE en el equity actual."
                 Write-Host "         Baja max_entry_lots / max_recovery_lots del M15 antes de operar." -ForegroundColor DarkGray
                 Write-Host "         Detalle en $outMargin" -ForegroundColor DarkGray
