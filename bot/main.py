@@ -131,6 +131,14 @@ def setup(logger=None, engine_cls=None):
                  balance=broker.account_balance())
     for w in identity_warnings:
         logger.write("SYSTEM", f"[AVISO] {w}")
+
+    # Aviso temprano: sin AutoTrading el motor gestiona y calcula, pero toda
+    # apertura sera rechazada por el terminal. Mejor verlo al arrancar que
+    # descubrirlo en el primer rechazo.
+    allowed, motivo = broker.trade_allowed()
+    if not allowed:
+        logger.write("ERROR", f"APERTURAS BLOQUEADAS: {motivo}",
+                     balance=broker.account_balance())
     if config.SHADOW_MODE:
         logger.write("SYSTEM", "MODO SOMBRA activo: no se enviaran ordenes reales; solo se loguean decisiones.")
 

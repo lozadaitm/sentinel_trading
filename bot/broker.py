@@ -6,9 +6,27 @@ SHADOW_MODE: si esta activo, las operaciones de escritura se loguean
 pero NO se envian al broker.
 """
 
+from types import SimpleNamespace
+
 import MetaTrader5 as mt5
 
 from . import config
+
+# Traduccion de los retcodes que mas cuesta diagnosticar leyendo solo el numero.
+_RETCODE_AYUDA = {
+    10004: "Requote: el precio se movio. Transitorio.",
+    10006: "Rechazada por el broker.",
+    10014: "Volumen invalido para el simbolo.",
+    10015: "Precio invalido.",
+    10016: "Stops invalidos: el SL/TP cae dentro del SYMBOL_TRADE_STOPS_LEVEL.",
+    10017: "Trading deshabilitado para la cuenta.",
+    10018: "Mercado cerrado.",
+    10019: "Fondos insuficientes para abrir ese volumen.",
+    10021: "Sin precios: el simbolo no cotiza ahora mismo.",
+    10026: "AutoTrading desactivado en el SERVIDOR del broker.",
+    10027: "AutoTrading desactivado en el TERMINAL: boton 'Algo Trading' (Ctrl+E).",
+    10030: "Modo de llenado no soportado por el broker (type_filling).",
+}
 
 
 class Broker:
@@ -17,6 +35,8 @@ class Broker:
         self.magic = config.MAGIC_NUMBER
         self.logger = logger
         self.shadow = shadow
+        self._block_reason = None   # motivo de bloqueo ya logueado (anti-spam)
+        self._last_reject = None    # ultimo (retcode, comment) rechazado
 
     # --------------------------------------------------------------
     # Info de simbolo / cuenta
@@ -166,6 +186,41 @@ class Broker:
         return self.margin_free() >= margin_required * 1.1
 
     # --------------------------------------------------------------
+    # Permiso de trading
+    # --------------------------------------------------------------
+    def trade_allowed(self):
+        """(permitido, motivo). Comprueba terminal y cuenta ANTES de mandar nada.
+
+        Sin esto el motor descubre el bloqueo orden a orden: on_tick corre cada
+        segundo y un AutoTrading apagado produce un rechazo por segundo, cada uno
+        con su ERROR en bot_logs. Son estados que no se arreglan solos, asi que
+        conviene detectarlos antes de enviar y avisar UNA vez.
+        """
+        ti = mt5.terminal_info()
+        if ti is not None and not ti.trade_allowed:
+            return False, ("AutoTrading DESACTIVADO en el terminal. Pulsa el boton "
+                           "'Algo Trading' (Ctrl+E); debe quedar en verde.")
+        ai = mt5.account_info()
+        if ai is not None:
+            if not ai.trade_allowed:
+                return False, "El broker tiene el trading deshabilitado para esta cuenta."
+            if not ai.trade_expert:
+                return False, "El broker no permite EAs/algoritmos en esta cuenta."
+        return True, None
+
+    def _log_block(self, motivo):
+        """Loguea el bloqueo solo cuando CAMBIA, y su levantamiento."""
+        if motivo == self._block_reason:
+            return
+        if motivo is None:
+            self.logger.write("SYSTEM", "Trading rehabilitado: se reanudan las aperturas.",
+                              balance=self.account_balance())
+        else:
+            self.logger.write("ERROR", f"APERTURAS BLOQUEADAS: {motivo}",
+                              balance=self.account_balance())
+        self._block_reason = motivo
+
+    # --------------------------------------------------------------
     # Ordenes
     # --------------------------------------------------------------
     @staticmethod
@@ -198,12 +253,27 @@ class Broker:
             return
         ticket = getattr(res, "order", 0) or 0
         if getattr(res, "retcode", None) == mt5.TRADE_RETCODE_DONE:
+            self._last_reject = None
             self.logger.write(self._open_log_type(comment), f"Apertura {side}: {comment}",
                               price, lots, bal, ticket=ticket)
-        else:
-            rc = getattr(res, "retcode", "?")
-            self.logger.write("ERROR", f"Apertura {side} '{comment}' RECHAZADA (retcode {rc}).",
-                              price, lots, bal, ticket=ticket)
+            return
+
+        rc = getattr(res, "retcode", "?")
+        # Anti-spam: on_tick corre cada segundo, asi que un rechazo persistente
+        # (mercado cerrado, stops invalidos, sin dinero) generaria un ERROR por
+        # segundo. Se registra el primero de cada racha y, al terminar, cuantos
+        # hubo. Un rechazo distinto rompe la racha y vuelve a loguear.
+        if self._last_reject is not None and self._last_reject[0:2] == (rc, comment):
+            self._last_reject = (rc, comment, self._last_reject[2] + 1)
+            return
+        if self._last_reject is not None and self._last_reject[2] > 1:
+            self.logger.write("ERROR",
+                              f"(el rechazo anterior se repitio {self._last_reject[2]} veces)",
+                              balance=bal)
+        self._last_reject = (rc, comment, 1)
+        self.logger.write("ERROR", f"Apertura {side} '{comment}' RECHAZADA (retcode {rc}). "
+                                   f"{_RETCODE_AYUDA.get(rc, '')}".strip(),
+                          price, lots, bal, ticket=ticket)
 
     def market_order(self, order_type, lots, comment, sl=0.0, tp=0.0):
         """Abre a mercado. `sl`/`tp` en PRECIO (0 = sin stop), como MQL5.
@@ -214,6 +284,15 @@ class Broker:
         if self.shadow:
             self.logger.write("SHADOW", f"ORDER {('BUY' if order_type==mt5.ORDER_TYPE_BUY else 'SELL')} {comment}", 0, lots)
             return None
+
+        # Puerta previa: si el terminal o la cuenta no permiten operar, no se
+        # manda nada. Devolvemos el retcode real para que el llamante lo trate
+        # como el rechazo que es (p.ej. _open_hedge preserva el SL).
+        allowed, motivo = self.trade_allowed()
+        self._log_block(motivo)
+        if not allowed:
+            return SimpleNamespace(retcode=mt5.TRADE_RETCODE_CLIENT_DISABLES_AT, order=0)
+
         price = self.ask() if order_type == mt5.ORDER_TYPE_BUY else self.bid()
         request = {
             "action": mt5.TRADE_ACTION_DEAL,

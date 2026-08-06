@@ -579,6 +579,62 @@ def run():
     n_cov = sum(1 for t, m in e16.log.events if t == "HEALER" and "Cobertura protegida" in m)
     check("el aviso de cobertura protegida se loguea 1 vez por ciclo", n_cov == 1, f"n={n_cov}")
 
+    # ---------- 14. Rechazos del broker: sin spam ----------
+    print("\n[14] Rechazos persistentes del broker")
+    from bot.broker import Broker
+
+    class TermBroker(Broker):
+        """Broker real con MT5 sustituido por un doble, para probar el logging."""
+        def __init__(self, logger, allowed=True, retcode=None):
+            self.symbol, self.magic, self.shadow = "XAUUSD+", config.MAGIC_M5, False
+            self.logger = logger
+            self._block_reason = None
+            self._last_reject = None
+            self._allowed, self._retcode = allowed, retcode
+        def trade_allowed(self):
+            if self._allowed: return (True, None)
+            return (False, "AutoTrading DESACTIVADO en el terminal. Pulsa el boton 'Algo Trading' (Ctrl+E); debe quedar en verde.")
+        def account_balance(self): return 5000.0
+        def ask(self): return 4274.76
+        def bid(self): return 4274.61
+
+    # 14a. AutoTrading apagado: ni se envia la orden, y se avisa UNA vez.
+    lg14 = FakeLogger()
+    tb = TermBroker(lg14, allowed=False)
+    for _ in range(30):
+        res = tb.market_order(mt5.ORDER_TYPE_BUY, 0.09, "M5 Surfer Buy")
+    errs = [m for t, m in lg14.events if t == "ERROR"]
+    check("AutoTrading off -> 30 intentos producen 1 solo ERROR", len(errs) == 1, f"n={len(errs)}")
+    check("el ERROR explica que hay que pulsar Algo Trading",
+          len(errs) == 1 and "Algo Trading" in errs[0])
+    check("devuelve el retcode real 10027 (CLIENT_DISABLES_AT)",
+          getattr(res, "retcode", None) == mt5.TRADE_RETCODE_CLIENT_DISABLES_AT)
+
+    # 14b. Al rehabilitarlo, se avisa del restablecimiento.
+    tb._allowed = True
+    tb._log_block(None)
+    check("al reactivar AutoTrading avisa del restablecimiento",
+          any(t == "SYSTEM" and "rehabilitado" in m for t, m in lg14.events))
+
+    # 14c. Rechazos repetidos del broker: se loguea el primero, no los 30.
+    lg15 = FakeLogger()
+    tb2 = TermBroker(lg15, allowed=True)
+    rechazo = type("R", (), {"retcode": 10018, "order": 0})()
+    for _ in range(30):
+        tb2._log_open(rechazo, mt5.ORDER_TYPE_BUY, 0.09, 4274.76, "M5 Surfer Buy")
+    errs2 = [m for t, m in lg15.events if t == "ERROR"]
+    check("30 rechazos identicos -> 1 ERROR", len(errs2) == 1, f"n={len(errs2)}")
+    check("el ERROR traduce el retcode a lenguaje humano",
+          len(errs2) == 1 and "Mercado cerrado" in errs2[0], errs2[0] if errs2 else "")
+
+    # Un rechazo DISTINTO rompe la racha y resume la anterior.
+    otro = type("R", (), {"retcode": 10019, "order": 0})()
+    tb2._log_open(otro, mt5.ORDER_TYPE_BUY, 0.09, 4274.76, "M5 Surfer Buy")
+    errs3 = [m for t, m in lg15.events if t == "ERROR"]
+    check("un retcode distinto vuelve a loguear", len(errs3) == 3, f"n={len(errs3)}")
+    check("y resume cuantas veces se repitio el anterior",
+          any("se repitio 30 veces" in m for m in errs3))
+
     print("\n" + "=" * 60)
     if fails:
         print("FALLOS (%d): %s" % (len(fails), fails))
