@@ -34,6 +34,21 @@ Correcciones sobre el original
   - Circuit breaker de volatilidad (VCB), portado del Sentinel.
   - Gobierno de margen (bot/budget.py).
 
+Mejoras v2 (estudio de lateralizacion; el M15 NO se toco)
+---------------------------------------------------------
+  - Regimen con HISTERESIS: Scalper/Surfer es un estado con banda muerta de
+    ADX (entra a Surfer >= m5_trend_adx, vuelve a Scalper < m5_trend_adx_exit),
+    no una comparacion seca por vela que alternaba modos con ADX ~30.
+  - Estructura de rango M15: el fade del Scalper solo cerca del EXTREMO del
+    rango real (fractales M15 confirmados), no en cualquier toque de la banda
+    local, que sigue al precio y puede "romperse" en el centro del rango.
+  - Veto de ruptura: con breakout M15 confirmado (vela cerrada) no se
+    revierte en su contra. Mismo indicador que usa el Sentinel para entrar,
+    aqui usado al reves: para abstenerse.
+  - Cesion del Surfer: si el M15 ya lleva exposicion neta en esa direccion,
+    el Surfer no duplica la apuesta (lee MT5 por magic, igual que el
+    gobierno de margen; cero IPC).
+
 Indexacion: igual que bot/indicators.py. MQL5 [0] == .iloc[-1], [1] == .iloc[-2].
 """
 
@@ -91,6 +106,12 @@ DEFAULTS = {
     "m5_max_spread": 350,
     "m5_use_vcb": True,
     "m5_vcb_atr_mult": 2.8,
+    # v2: regimen + estructura de rango (estudio de lateralizacion)
+    "m5_trend_adx_exit": 24,      # histeresis: Surfer entra >= m5_trend_adx, vuelve a Scalper < este
+    "m5_use_range_struct": True,  # fade solo cerca del extremo del rango M15 (fractales)
+    "m5_range_edge_frac": 0.35,   # fraccion del alto del rango que cuenta como 'extremo'
+    "m5_use_breakout_veto": True, # no revertir contra una ruptura M15 confirmada
+    "m5_surfer_yield": True,      # el Surfer cede si el M15 ya esta expuesto en esa direccion
     # Gobierno de margen (rol JUNIOR)
     "equity_weight": 0.20,
     "margin_cap_pct": 10.0,
@@ -133,6 +154,12 @@ class M5Engine:
         self.close1 = self.high1 = self.low1 = 0.0
         self.bigbro_bias = 0
         self.df_m5 = None
+
+        # v2: regimen con histeresis + contexto de rango M15
+        self.regime = None       # 'scalper' | 'surfer' (estado, no comparacion por vela)
+        self.range_high = 0.0    # techo del rango M15 (ultimo fractal sup. confirmado)
+        self.range_low = 0.0     # piso del rango M15 (ultimo fractal inf. confirmado)
+        self.brk15 = 0           # ruptura M15 confirmada (+1/-1/0) para el veto del fade
 
     # ==============================================================
     # Parametros
@@ -219,7 +246,7 @@ class M5Engine:
         if best is not None:
             self.last_op_was_win = best.profit > 0
 
-    def _big_brother_bias(self):
+    def _big_brother_bias(self, df15=None):
         """GetBigBrotherBias(): 1 alcista / -1 bajista / 0 neutro, sobre EMA M15.
 
         Veta operar contra la tendencia mayor: no comprar mientras la EMA M15
@@ -228,7 +255,8 @@ class M5Engine:
         """
         if not self._p("m5_use_bigbro"):
             return 0
-        df15 = self._rates(config.TIMEFRAME_CORE)
+        if df15 is None:
+            df15 = self._rates(config.TIMEFRAME_CORE)
         if df15 is None:
             return 0
         ema15 = indicators.ema(df15["close"], int(self._p("m5_bigbro_period")))
@@ -240,6 +268,75 @@ class M5Engine:
         if e0 < e1 < e2:
             return -1
         return 0
+
+    def _update_regime(self):
+        """Regimen Scalper/Surfer conmutado por ADX, con HISTERESIS.
+
+        El original comparaba adx contra un umbral seco en cada vela: con el
+        ADX oscilando alrededor de m5_trend_adx el bot alternaba de modo vela
+        a vela (podia vender reversion en una y comprar tendencia en la
+        siguiente). Ahora el regimen es un ESTADO: se entra a Surfer al
+        superar m5_trend_adx y solo se vuelve a Scalper al caer por debajo de
+        m5_trend_adx_exit (banda muerta). Igualar ambos umbrales en bot_config
+        recupera el comportamiento clasico.
+        """
+        trend = float(self._p("m5_trend_adx"))
+        exit_th = min(float(self._p("m5_trend_adx_exit")), trend)
+        prev = self.regime
+        if self.regime is None:
+            self.regime = "surfer" if self.adx1 >= trend else "scalper"
+        elif self.regime == "scalper" and self.adx1 >= trend:
+            self.regime = "surfer"
+        elif self.regime == "surfer" and self.adx1 < exit_th:
+            self.regime = "scalper"
+        if prev is not None and self.regime != prev:
+            self.log.write("GRINDER",
+                           f"Cambio de regimen: {prev} -> {self.regime} (ADX {self.adx1:.1f}).",
+                           balance=self.b.account_balance())
+
+    def _fade_allowed(self, is_buy):
+        """Gates ESTRUCTURALES del fade del Scalper, sobre el rango M15.
+
+        1. Veto de ruptura: con una ruptura de fractal M15 CONFIRMADA (vela
+           cerrada) no se revierte en su contra. La banda EMA+-tolerancia no
+           distingue "extremo del rango" de "arranque de tendencia"; el
+           breakout M15 si.
+        2. Estructura de rango: el fade solo cerca del EXTREMO del rango real
+           (fractales M15), no en cualquier toque de la banda local. La banda
+           sigue al precio: en un rango amplio puede romperse en el CENTRO
+           del rango, el peor lugar para revertir.
+
+        Sin fractales confirmados (tendencia limpia, warmup) se degrada al
+        comportamiento clasico: deciden banda + RSI + Gran Hermano.
+        """
+        if self._p("m5_use_breakout_veto"):
+            if is_buy and self.brk15 == -1:
+                return False
+            if not is_buy and self.brk15 == 1:
+                return False
+        if not self._p("m5_use_range_struct"):
+            return True
+        hi, lo = self.range_high, self.range_low
+        if not (hi > lo > 0.0):
+            return True  # sin rango M15 utilizable: fallback al filtro clasico
+        edge = (hi - lo) * float(self._p("m5_range_edge_frac"))
+        if is_buy:
+            return self.close1 <= lo + edge
+        return self.close1 >= hi - edge
+
+    def _peer_net(self):
+        """Exposicion neta (lotes) de los bots vecinos (el Sentinel M15).
+
+        Se lee directo de MT5 por magic, el mismo canal sin-DB que usa el
+        gobierno de margen: latencia cero y sobrevive si un proceso muere.
+        """
+        net = 0.0
+        for magic in self.gov.peer_magics:
+            if magic == self.b.magic:
+                continue
+            for p in self.b.positions_of_magic(magic):
+                net += p.volume if p.type == mt5.POSITION_TYPE_BUY else -p.volume
+        return net
 
     def _vol_breaker_active(self):
         """VCB: vela M5 en curso anomala (rango >= ATR * mult). Bloquea aperturas."""
@@ -370,9 +467,11 @@ class M5Engine:
         my_pos = len(self._my_positions())
         adx = self.adx1
         trend_adx = int(self._p("m5_trend_adx"))
-        mode = "Surfer (tendencia)" if adx >= trend_adx else "Scalper (reversion)"
+        exit_adx = min(int(self._p("m5_trend_adx_exit")), trend_adx)
+        surfing = self.regime == "surfer"
+        mode = "Surfer (tendencia)" if surfing else "Scalper (reversion)"
 
-        if adx < trend_adx:
+        if not surfing:
             side = "BUY" if self.rsi1 < int(self._p("m5_rsi_os")) else (
                 "SELL" if self.rsi1 > int(self._p("m5_rsi_ob")) else "-")
         else:
@@ -381,7 +480,8 @@ class M5Engine:
         gates = []
         max_sp = int(self._p("m5_max_spread"))
         gates.append(("Spread", str(spread), f"<= {max_sp}", spread <= max_sp))
-        gates.append(("Modo (ADX)", f"{adx:.1f} -> {mode}", f"umbral {trend_adx}", True))
+        gates.append(("Modo (ADX)", f"{adx:.1f} -> {mode}",
+                      f"Surfer >= {trend_adx} / Scalper < {exit_adx}", True))
         gates.append(("Posiciones", str(my_pos), "0", my_pos == 0))
 
         bias_txt = {1: "Alcista (+1)", -1: "Bajista (-1)"}.get(self.bigbro_bias, "Neutro (0)")
@@ -392,7 +492,7 @@ class M5Engine:
         else:
             gates.append(("Gran Hermano M15", bias_txt, "-", True))
 
-        if adx < trend_adx:
+        if not surfing:
             width_atr = ((upper - lower) / self.atr1) if self.atr1 else 0.0
             gates.append(("Ancho de banda", f"{width_atr:.2f} ATR",
                           f"<= {float(self._p('m5_max_band_atr')):.2f} ATR", band_ok))
@@ -403,6 +503,26 @@ class M5Engine:
             gates.append(("RSI (M5)", f"{self.rsi1:.1f}",
                           f"< {int(self._p('m5_rsi_os'))} o > {int(self._p('m5_rsi_ob'))}",
                           self.rsi1 < int(self._p("m5_rsi_os")) or self.rsi1 > int(self._p("m5_rsi_ob"))))
+            if self._p("m5_use_range_struct"):
+                hi, lo = self.range_high, self.range_low
+                if hi > lo > 0:
+                    edge = (hi - lo) * float(self._p("m5_range_edge_frac"))
+                    if side == "BUY":
+                        ok_rng = self.close1 <= lo + edge
+                        req = f"cerca del piso (<= {lo + edge:.2f})"
+                    elif side == "SELL":
+                        ok_rng = self.close1 >= hi - edge
+                        req = f"cerca del techo (>= {hi - edge:.2f})"
+                    else:
+                        ok_rng, req = True, "en extremo"
+                    gates.append(("Rango M15", f"{lo:.2f} .. {hi:.2f}", req, ok_rng))
+                else:
+                    gates.append(("Rango M15", "sin fractales", "fallback banda", True))
+            if self._p("m5_use_breakout_veto"):
+                brk_txt = {1: "alza (+1)", -1: "baja (-1)"}.get(self.brk15, "no (0)")
+                veto = ((side == "BUY" and self.brk15 == -1)
+                        or (side == "SELL" and self.brk15 == 1))
+                gates.append(("Ruptura M15", brk_txt, "sin ruptura en contra", not veto))
         else:
             rmax = int(self._p("m5_surfer_rsi_max"))
             gates.append(("Precio vs EMA", f"{self.close1:.2f} vs {self.ema1:.2f}",
@@ -412,6 +532,12 @@ class M5Engine:
             gates.append(("Racha / RSI forzado",
                           "ganadora" if self.last_op_was_win else f"{self.rsi1:.1f}",
                           "ultima ganadora o RSI de confirmacion", True))
+            if self._p("m5_surfer_yield"):
+                net = self._peer_net()
+                yield_block = ((side == "BUY" and net > 1e-9)
+                               or (side == "SELL" and net < -1e-9))
+                gates.append(("Cede al M15", f"net vecino {net:+.2f}",
+                              "sin exposicion M15 del mismo lado", not yield_block))
 
         gates.append(("Horario", self._server_dt().strftime("%H:%M"),
                       f"{int(self._p('m5_start_hour'))}h - {int(self._p('m5_end_hour'))}h", in_hours))
@@ -463,7 +589,18 @@ class M5Engine:
             self.hud = {"status": "Retirado por nivel de margen (FLATTEN)."}
             return
 
-        self.bigbro_bias = self._big_brother_bias()
+        # Contexto M15 (una sola lectura por tick): Gran Hermano + estructura
+        # de rango por fractales + ruptura confirmada para el veto del fade.
+        df15 = self._rates(config.TIMEFRAME_CORE)
+        self.bigbro_bias = self._big_brother_bias(df15)
+        if df15 is not None:
+            self.range_high, self.range_low = indicators.fractal_range(df15)
+            self.brk15 = indicators.check_m15_breakout(df15)
+        else:
+            self.range_high = self.range_low = 0.0
+            self.brk15 = 0
+
+        self._update_regime()
         self.spread_high = self.b.spread() > int(self._p("m5_max_spread"))
 
         self.vol_breaker = self._vol_breaker_active()
@@ -505,30 +642,31 @@ class M5Engine:
         signal_buy = False
         signal_sell = False
         comment = ""
-        trend_adx = int(self._p("m5_trend_adx"))
 
         # =========================================================
-        # 1. SCALPER (reversion) - ADX bajo
+        # 1. SCALPER (reversion) - regimen de rango (ADX con histeresis)
         # =========================================================
-        if self._p("m5_use_reversion") and self.adx1 < trend_adx:
+        if self._p("m5_use_reversion") and self.regime == "scalper":
             # Bandas demasiado abiertas = mercado explotando. Revertir ahi es
             # atrapar el cuchillo: se abstiene.
             if band_ok:
                 if self.low1 < lower and self.rsi1 < int(self._p("m5_rsi_os")):
-                    # No comprar si el M15 cae con fuerza.
-                    if self.bigbro_bias != -1:
+                    # No comprar si el M15 cae con fuerza, ni lejos del piso
+                    # del rango M15, ni contra una ruptura bajista confirmada.
+                    if self.bigbro_bias != -1 and self._fade_allowed(True):
                         signal_buy = True
                         comment = "M5 Reversion Buy"
                 elif self.high1 > upper and self.rsi1 > int(self._p("m5_rsi_ob")):
-                    # No vender si el M15 sube con fuerza.
-                    if self.bigbro_bias != 1:
+                    # No vender si el M15 sube con fuerza, ni lejos del techo
+                    # del rango M15, ni contra una ruptura alcista confirmada.
+                    if self.bigbro_bias != 1 and self._fade_allowed(False):
                         signal_sell = True
                         comment = "M5 Reversion Sell"
 
         # =========================================================
-        # 2. SURFER (tendencia) - ADX alto
+        # 2. SURFER (tendencia) - regimen de tendencia (ADX con histeresis)
         # =========================================================
-        elif self._p("m5_use_surfer") and self.adx1 >= trend_adx:
+        elif self._p("m5_use_surfer") and self.regime == "surfer":
             rsi_max = int(self._p("m5_surfer_rsi_max"))
             if self.close1 > self.ema1 and self.rsi1 < rsi_max:
                 if self.last_op_was_win or self.rsi1 > int(self._p("m5_force_rsi_buy")):
@@ -540,6 +678,16 @@ class M5Engine:
                     if self.bigbro_bias != 1:
                         signal_sell = True
                         comment = "M5 Surfer Sell"
+
+            # Cesion al senior: en tendencia, el Sentinel M15 ya es el
+            # especialista (ruptura + ciclo). Si el vecino lleva exposicion
+            # neta del MISMO lado, este scalp solo duplicaria la apuesta
+            # direccional de la cuenta; se cede el turno y el margen.
+            if (signal_buy or signal_sell) and self._p("m5_surfer_yield"):
+                net = self._peer_net()
+                if (signal_buy and net > 1e-9) or (signal_sell and net < -1e-9):
+                    signal_buy = signal_sell = False
+                    comment = ""
 
         if not (signal_buy or signal_sell):
             return

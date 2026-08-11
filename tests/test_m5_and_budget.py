@@ -28,6 +28,9 @@ descubrir en vivo:
           negativo. Reproduce el escenario real del 17-07 (cesta corta a favor
           con el Hedge Lock BUY como unico leg contra-direccional, que era el
           argmin y se comieron a mordiscos).
+  [15]    M5 v2: histeresis del regimen ADX, estructura de rango fractal M15
+          para el fade, veto de ruptura confirmada y cesion del Surfer ante
+          un M15 ya expuesto del mismo lado.
 
 Uso:  python -m tests.test_m5_and_budget      (desde la raiz del repo)
 """
@@ -634,6 +637,81 @@ def run():
     check("un retcode distinto vuelve a loguear", len(errs3) == 3, f"n={len(errs3)}")
     check("y resume cuantas veces se repitio el anterior",
           any("se repitio 30 veces" in m for m in errs3))
+
+    # ---------- 15. M5 v2: regimen, rango y vetos ----------
+    print("\n[15] M5 v2: histeresis ADX + estructura de rango + vetos")
+    b17, lg17 = FakeBroker(), FakeLogger()
+    eng17 = TestEngine(b17, lg17, series(**REVERSION_M5), series(**UP_M15))
+    eng17.cfg = {}
+    # Histeresis: el regimen es un ESTADO con banda muerta (24..30), no una
+    # comparacion seca por vela.
+    eng17.adx1 = 35.0; eng17._update_regime()
+    check("ADX 35 -> Surfer", eng17.regime == "surfer")
+    eng17.adx1 = 27.0; eng17._update_regime()
+    check("ADX 27 (banda muerta) -> sigue Surfer", eng17.regime == "surfer")
+    eng17.adx1 = 22.0; eng17._update_regime()
+    check("ADX 22 -> vuelve a Scalper", eng17.regime == "scalper")
+    eng17.adx1 = 27.0; eng17._update_regime()
+    check("ADX 27 (banda muerta) -> sigue Scalper", eng17.regime == "scalper")
+    eng17.adx1 = 31.0; eng17._update_regime()
+    check("ADX 31 -> Surfer de nuevo", eng17.regime == "surfer")
+    n_reg = sum(1 for t, m in lg17.events if t == "GRINDER" and "regimen" in m)
+    check("cada transicion (no el init) se loguea", n_reg == 2, f"n={n_reg}")
+
+    # Estructura de rango: fade solo cerca del extremo fractal M15.
+    eng17.range_high, eng17.range_low, eng17.brk15 = 4100.0, 4000.0, 0
+    eng17.close1 = 4010.0
+    check("BUY en el tercio inferior del rango: permitido", eng17._fade_allowed(True))
+    check("SELL en el tercio inferior: bloqueado", not eng17._fade_allowed(False))
+    eng17.close1 = 4050.0
+    check("fade en el CENTRO del rango: bloqueado en ambos lados",
+          not eng17._fade_allowed(True) and not eng17._fade_allowed(False))
+    eng17.close1 = 4090.0
+    check("SELL en el tercio superior: permitido", eng17._fade_allowed(False))
+    # Sin fractales confirmados se degrada al comportamiento clasico.
+    eng17.range_high = eng17.range_low = 0.0
+    check("sin rango M15: fallback permite el fade", eng17._fade_allowed(True))
+    # Veto de ruptura confirmada: no revertir contra el breakout M15.
+    eng17.range_high, eng17.range_low = 4100.0, 4000.0
+    eng17.close1 = 4090.0; eng17.brk15 = 1
+    check("ruptura alcista confirmada -> veta el SELL", not eng17._fade_allowed(False))
+    eng17.close1 = 4010.0; eng17.brk15 = -1
+    check("ruptura bajista confirmada -> veta el BUY", not eng17._fade_allowed(True))
+    eng17.brk15 = 0
+    # Desactivable por config, como todo lo nuevo.
+    eng17.cfg = {"m5_use_range_struct": False, "m5_use_breakout_veto": False}
+    eng17.close1 = 4050.0; eng17.brk15 = 1
+    check("con los gates OFF se recupera el comportamiento clasico",
+          eng17._fade_allowed(True) and eng17._fade_allowed(False))
+    eng17.brk15 = 0
+
+    # fractal_range sobre un rango sintetico con techos y pisos claros.
+    from bot import indicators as _ind15
+    osc = series(n=120, start=4000, drift=0.0, noise=0.0, seed=2)
+    osc["close"] = 4000 + 20 * np.sin(np.arange(120) * 0.35)
+    osc["high"] = osc["close"] + 1.0
+    osc["low"] = osc["close"] - 1.0
+    hi15, lo15 = _ind15.fractal_range(osc)
+    check("fractal_range encuentra techo y piso confirmados",
+          hi15 > 0 and lo15 > 0 and hi15 > lo15, f"hi={hi15:.2f} lo={lo15:.2f}")
+
+    # Cesion del Surfer: con el M15 ya largo, el scalp BUY cede el turno.
+    b18, lg18 = FakeBroker(magic=config.MAGIC_M5), FakeLogger()
+    df5s = series(**SURFER_M5)
+    b18._price = float(df5s["close"].iloc[-1])
+    eng18 = TestEngine(b18, lg18, df5s, series(**UP_M15))
+    eng18.cfg = {}
+    eng18.gov.peer_magics = (config.MAGIC_M15,)
+    b18._pos.append(FakePos(50, mt5.POSITION_TYPE_BUY, 0.5, 3900.0, 0,
+                            "SMC Buy Entry", config.MAGIC_M15))
+    eng18.on_tick()
+    m5_orders = [o for o in b18.orders if o["comment"].startswith("M5 ")]
+    check("Surfer BUY cede con el M15 ya largo", len(m5_orders) == 0, str(m5_orders))
+    b18._pos = [p for p in b18._pos if p.magic != config.MAGIC_M15]
+    eng18.on_tick()
+    m5_orders = [o for o in b18.orders if o["comment"].startswith("M5 ")]
+    check("sin exposicion M15, el Surfer vuelve a operar", len(m5_orders) == 1,
+          str(m5_orders))
 
     print("\n" + "=" * 60)
     if fails:

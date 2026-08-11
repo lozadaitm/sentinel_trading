@@ -152,6 +152,33 @@ def get_h4_structure(df_h4, use_h4_struct=True):
     return 0
 
 
+def fractal_range(df, max_shift=60):
+    """Techo y piso del rango vigente: ultimo fractal superior e inferior
+    CONFIRMADOS (5 barras, estilo Bill Williams). -> (high, low); 0.0 si no hay.
+
+    Lo consume el M5 (estructura de rango del Scalper). Es solo-lectura y
+    aditivo: el Sentinel M15 no lo usa.
+    """
+    highs = df["high"].values
+    lows = df["low"].values
+    up = _up_fractals(highs)
+    dn = _down_fractals(lows)
+
+    hi = lo = 0.0
+    for i in range(2, max_shift):
+        if hi == 0.0:
+            f = _frac_at_shift(up, i)
+            if f > 0:
+                hi = f
+        if lo == 0.0:
+            f = _frac_at_shift(dn, i)
+            if f > 0:
+                lo = f
+        if hi > 0 and lo > 0:
+            break
+    return hi, lo
+
+
 def check_m15_breakout(df_m15):
     """Breakout M15 -> 1 / -1 / 0. Replica CheckM15Breakout (MQL5 301-314)."""
     highs = df_m15["high"].values
