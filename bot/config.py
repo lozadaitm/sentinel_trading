@@ -132,6 +132,16 @@ MT5_LOGIN = os.environ.get("MT5_LOGIN", "")     # login numerico de la cuenta
 MT5_SERVER = os.environ.get("MT5_SERVER", "")   # servidor del broker
 MT5_PASSWORD = os.environ.get("MT5_PASSWORD", "")
 
+# ==================================================================
+# NEWSGUARD (bot/news.py)  - snapshot del calendario economico
+# Lo escribe scripts/CalendarExporter.mq5 en la carpeta COMUN de
+# MetaQuotes: una sola ruta que sirve a todas las instancias de esta PC.
+# ==================================================================
+NEWS_CALENDAR_PATH = os.environ.get(
+    "NEWS_CALENDAR_PATH",
+    os.path.join(os.environ.get("APPDATA", ""), "MetaQuotes", "Terminal",
+                 "Common", "Files", "news_calendar.json"))
+
 TIMEFRAME_CORE = mt5.TIMEFRAME_M15
 TIMEFRAME_M5 = mt5.TIMEFRAME_M5
 TIMEFRAME_STRUCT = mt5.TIMEFRAME_H4

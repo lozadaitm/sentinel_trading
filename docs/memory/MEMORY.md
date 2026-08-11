@@ -10,3 +10,4 @@
 - [Multi-bot: gobierno de margen](multi-bot-margin-governance.md) — M15 senior con Hedge Lock inbloqueable, M5 junior cede margen; coordinación vía magics en MT5, no por DB
 - [Unwind huérfana el hedge + estado por conteo](unwind-orphans-hedge-count-state.md) — auditoría 6-11 ago: Unwind bancaba la OP1 verde, el hedge huérfano se re-etiquetaba como OP1 (hedge-sobre-hedge, churn OP4); fix implementado: CycleLedger por roles (bot/ledger.py)
 - [M5 v2: régimen de rango](m5-range-regime-v2.md) — la mejora de lateralización vive en el M5 (M15 congelado): histéresis ADX, rango fractal M15, veto de ruptura, Surfer cede al M15
+- [NewsGuard Fase 1](newsguard-phase1.md) — bloqueo duro por rojas USD vía exportador MQL5→JSON; observación por default (`news_enforce=false`), M5 cierra pre-roja, L3 exento

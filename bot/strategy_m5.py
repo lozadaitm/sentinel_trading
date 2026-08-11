@@ -58,7 +58,7 @@ import math
 import MetaTrader5 as mt5
 import pandas as pd
 
-from . import budget, config, indicators
+from . import budget, config, indicators, news
 
 # Defaults = valores input del MQL5 original (fallback si falta en bot_config).
 DEFAULTS = {
@@ -106,6 +106,15 @@ DEFAULTS = {
     "m5_max_spread": 350,
     "m5_use_vcb": True,
     "m5_vcb_atr_mult": 2.8,
+    # NewsGuard Fase 1 (bloqueo duro por rojas; ver bot/news.py). El M5 vive en
+    # minutos (TimeStop 45'), por eso su ventana previa es corta: un scalp
+    # abierto T-60' casi seguro ya murio o va asegurado cuando llega el dato.
+    "news_enforce": False,        # False = OBSERVACION: loguea, no bloquea ni cierra
+    "news_pre_seconds": 3600,     # bloqueo de aperturas desde T-60min
+    "news_post_seconds": 3600,    # hasta T+1h del ultimo evento del cluster
+    "news_currencies": "USD",
+    "news_flatten": True,         # cierra el scalp vivo antes de la roja (su SL es saltable por gap)
+    "news_flatten_pre_seconds": 1800,  # cierre preventivo desde T-30min
     # v2: regimen + estructura de rango (estudio de lateralizacion)
     "m5_trend_adx_exit": 24,      # histeresis: Surfer entra >= m5_trend_adx, vuelve a Scalper < este
     "m5_use_range_struct": True,  # fade solo cerca del extremo del rango M15 (fractales)
@@ -154,6 +163,12 @@ class M5Engine:
         self.close1 = self.high1 = self.low1 = 0.0
         self.bigbro_bias = 0
         self.df_m5 = None
+
+        # NewsGuard (Fase 1): ventana dura alrededor de noticias rojas.
+        self.news = news.NewsGuard(config.NEWS_CALENDAR_PATH, logger)
+        self.news_active = False
+        self.news_block = False
+        self.news_reason = None
 
         # v2: regimen con histeresis + contexto de rango M15
         self.regime = None       # 'scalper' | 'surfer' (estado, no comparacion por vela)
@@ -550,6 +565,11 @@ class M5Engine:
                       f"req {lots:.2f} lot", budget_ok))
         if self.vol_breaker:
             gates.append(("VCB", "ACTIVADO", "liberado", False))
+        if self.news_active:
+            estado = (self.news_reason or "ventana activa")
+            if not self._p("news_enforce"):
+                estado += " (obs)"
+            gates.append(("Noticias", estado, "fuera de ventana roja", not self.news_block))
 
         self.hud = {
             "status": None,
@@ -610,6 +630,28 @@ class M5Engine:
                            balance=self.b.account_balance())
             self.vol_breaker_prev = self.vol_breaker
 
+        # NewsGuard (Fase 1): ventana dura de noticias rojas. Igual que
+        # spread/VCB solo frena aperturas; con enforcement ademas cierra el
+        # scalp vivo en la zona T-flatten (el SL del M5 es saltable por gap,
+        # a diferencia del M15, que aguanta noticias por diseño con su hedge).
+        self.news_active, self.news_reason = self.news.check(
+            self.now, int(self._p("news_pre_seconds")),
+            int(self._p("news_post_seconds")), self._p("news_currencies"))
+        self.news_block = self.news_active and bool(self._p("news_enforce"))
+        if (self.news_block and self._p("news_flatten") and self._my_positions()):
+            fl_active, fl_reason = self.news.in_window(
+                self.now, int(self._p("news_flatten_pre_seconds")),
+                int(self._p("news_post_seconds")), self._p("news_currencies"))
+            if fl_active:
+                for p in self._my_positions():
+                    money = p.profit + p.swap
+                    tkt = p.ticket
+                    self.b.close_position(p, "M5 News Flatten")
+                    self.log.write("NOTICIAS",
+                                   f"Cierre preventivo pre-noticia ({fl_reason}). PnL: {money:.2f}",
+                                   p.price_current, p.volume, self.b.account_balance(),
+                                   ticket=tkt)
+
         # --- Bandas y regimen (sobre la vela cerrada) ---
         tolerance = self._dynamic_tolerance(self.adx1, self.close1, self.atr1)
         upper = self.ema1 + tolerance
@@ -626,7 +668,7 @@ class M5Engine:
         self._build_hud(upper, lower, band_ok, in_hours)
 
         # --- Gates de apertura ---
-        if self.close_only or self.spread_high or self.vol_breaker:
+        if self.close_only or self.spread_high or self.vol_breaker or self.news_block:
             return
         if not in_hours:
             return
@@ -722,3 +764,11 @@ class M5Engine:
                            f"| GranHermano {self.bigbro_bias} | SL {sl:.2f}",
                            self.b.ask() if signal_buy else self.b.bid(), lots,
                            self.b.account_balance())
+            # Auditoria del NewsGuard: en modo observacion, deja constancia de
+            # los scalps que el enforcement habria bloqueado (dato que calibra
+            # los umbrales antes de activarlo).
+            if self.news_active and not self.news_block:
+                self.log.write("NOTICIAS",
+                               f"Scalp abierto en ventana de noticia [observacion]: "
+                               f"{self.news_reason}.",
+                               balance=self.b.account_balance())

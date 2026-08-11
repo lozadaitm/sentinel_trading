@@ -31,6 +31,10 @@ descubrir en vivo:
   [15]    M5 v2: histeresis del regimen ADX, estructura de rango fractal M15
           para el fade, veto de ruptura confirmada y cesion del Surfer ante
           un M15 ya expuesto del mismo lado.
+  [16]    NewsGuard Fase 1: ventanas duras por rojas USD (pre/post, cluster
+          por solape, filtros de divisa/importancia), fail-safe permisivo con
+          alerta deduplicada, enforcement vs observacion en ambos motores,
+          cierre preventivo del M5 y excepcion del rescate L3 en el M15.
 
 Uso:  python -m tests.test_m5_and_budget      (desde la raiz del repo)
 """
@@ -712,6 +716,159 @@ def run():
     m5_orders = [o for o in b18.orders if o["comment"].startswith("M5 ")]
     check("sin exposicion M15, el Surfer vuelve a operar", len(m5_orders) == 1,
           str(m5_orders))
+
+    # ---------- 16. NewsGuard Fase 1 ----------
+    print("\n[16] NewsGuard - bloqueo duro por noticias rojas")
+    import json as _json
+    import os
+    import tempfile
+
+    from bot.news import NewsGuard
+
+    T0 = 1_700_100_000
+    tmp_news = os.path.join(tempfile.gettempdir(), "sentinel_test_news.json")
+    with open(tmp_news, "w", encoding="utf-8") as f:
+        _json.dump({"generated_at": T0 - 600, "events": [
+            {"time": T0, "currency": "USD", "importance": "high", "name": "CPI"},
+            {"time": T0 + 9000, "currency": "USD", "importance": "high", "name": "FOMC"},
+        ]}, f)
+
+    lgN = FakeLogger()
+    gN = NewsGuard(tmp_news, lgN)
+    PRE, POST = 7200, 3600
+    check("dentro de T-2h: activo", gN.in_window(T0 - 7000, PRE, POST, "USD")[0])
+    check("antes de T-2h: inactivo", not gN.in_window(T0 - 7300, PRE, POST, "USD")[0])
+    check("en T+50min: activo", gN.in_window(T0 + 3000, PRE, POST, "USD")[0])
+    # Cluster: CPI(T0) y FOMC(T0+2.5h). El valle entre ambos queda cubierto por
+    # el solape de ventanas: el bloqueo corre hasta T+1h del ULTIMO evento.
+    act, reason = gN.in_window(T0 + 5000, PRE, POST, "USD")
+    check("valle entre rojas encadenadas: sigue activo", act, str(reason))
+    check("el motivo apunta al evento que viene", act and "FOMC" in reason, str(reason))
+    check("T+1h del ultimo del cluster: libre", not gN.in_window(T0 + 12700, PRE, POST, "USD")[0])
+
+    # Filtros: una roja EUR y una naranja USD no activan el guard (default USD/high).
+    tmp_news2 = os.path.join(tempfile.gettempdir(), "sentinel_test_news2.json")
+    with open(tmp_news2, "w", encoding="utf-8") as f:
+        _json.dump({"generated_at": T0, "events": [
+            {"time": T0, "currency": "EUR", "importance": "high", "name": "ECB Rate"},
+            {"time": T0, "currency": "USD", "importance": "moderate", "name": "ISM"},
+        ]}, f)
+    gN2 = NewsGuard(tmp_news2, FakeLogger())
+    check("roja EUR + naranja USD: no activan (filtros)",
+          not gN2.in_window(T0, PRE, POST, "USD")[0])
+    check("con EUR incluida en config, la roja EUR SI activa",
+          gN2.in_window(T0, PRE, POST, "USD,EUR")[0])
+
+    # Fail-safe permisivo con alerta deduplicada.
+    lgN3 = FakeLogger()
+    gN3 = NewsGuard(os.path.join(tempfile.gettempdir(), "no_existe_news.json"), lgN3)
+    check("sin archivo: permisivo", not gN3.in_window(T0, PRE, POST, "USD")[0])
+    gN3.in_window(T0 + 70, PRE, POST, "USD")  # segundo intento tras el throttle
+    nerr = sum(1 for t, m in lgN3.events if t == "ERROR")
+    check("sin archivo: 1 sola alerta ERROR (dedupe)", nerr == 1, f"n={nerr}")
+
+    # check() loguea las transiciones ACTIVA/liberada una sola vez.
+    gN._last_active = None
+    gN.check(T0 - 7000, PRE, POST, "USD")
+    gN.check(T0 - 6900, PRE, POST, "USD")
+    gN.check(T0 + 12700, PRE, POST, "USD")
+    trans = [m for t, m in lgN.events if t == "NOTICIAS"]
+    check("transiciones ACTIVA/liberada con dedupe", len(trans) == 2, str(trans))
+
+    class FakeGuard:
+        """Doble del NewsGuard para forzar estados en los motores."""
+        def __init__(self, active=False, flatten=False, reason="CPI (USD) en 30 min"):
+            self.active, self.flatten, self.reason = active, flatten, reason
+        def check(self, now, pre, post, currencies):
+            return (self.active, self.reason if self.active else None)
+        def in_window(self, now, pre, post, currencies):
+            return (self.flatten, self.reason if self.flatten else None)
+
+    # --- M5: enforcement bloquea el scalp; observacion lo deja y lo audita ---
+    b19, lg19 = FakeBroker(), FakeLogger()
+    df5n = series(**SURFER_M5)
+    b19._price = float(df5n["close"].iloc[-1])
+    eng19 = TestEngine(b19, lg19, df5n, series(**UP_M15))
+    eng19.cfg = {"news_enforce": True}
+    eng19.news = FakeGuard(active=True)
+    eng19.on_tick()
+    check("M5: enforcement bloquea el scalp", len(b19.orders) == 0, str(b19.orders))
+    check("M5: el HUD muestra el gate de noticias",
+          any(g[0] == "Noticias" for g in eng19.hud.get("gates", [])))
+
+    b20, lg20 = FakeBroker(), FakeLogger()
+    b20._price = float(df5n["close"].iloc[-1])
+    eng20 = TestEngine(b20, lg20, df5n, series(**UP_M15))
+    eng20.cfg = {}                       # news_enforce=False (default): observacion
+    eng20.news = FakeGuard(active=True)
+    eng20.on_tick()
+    check("M5: en observacion el scalp SI abre", len(b20.orders) == 1, str(b20.orders))
+    obs20 = [m for t, m in lg20.events if t == "NOTICIAS" and "observacion" in m]
+    check("M5: la apertura queda auditada [observacion]", len(obs20) == 1, str(obs20))
+
+    # --- M5: cierre preventivo del scalp vivo en la zona T-flatten ---
+    b21, lg21 = FakeBroker(), FakeLogger()
+    b21._price = float(df5n["close"].iloc[-1])
+    eng21 = TestEngine(b21, lg21, df5n, series(**UP_M15))
+    eng21.cfg = {"news_enforce": True}
+    eng21.news = FakeGuard(active=True, flatten=True)
+    vivo = FakePos(60, mt5.POSITION_TYPE_BUY, 0.10, b21._price, 1_700_049_900,
+                   "M5 Surfer Buy", b21.magic)
+    vivo.profit = 4.0
+    b21._pos.append(vivo)
+    eng21.on_tick()
+    check("M5: cierra el scalp vivo antes de la roja", len(b21._pos) == 0)
+    check("M5: el cierre queda logueado como preventivo",
+          any(t == "NOTICIAS" and "preventivo" in m for t, m in lg21.events))
+    check("M5: y no abre nada nuevo en la ventana", len(b21.orders) == 0)
+
+    # --- M15: enforcement bloquea la OP1; observacion la deja y la audita ---
+    _ind.get_h4_structure = lambda df, use=True: 1
+    _ind.check_m15_breakout = lambda df: 1
+    try:
+        bn, lgn = FakeBroker(magic=config.MAGIC_M15), FakeLogger()
+        en = m15_engine(bn, lgn)
+        en.cfg = {"news_enforce": True}
+        en.news = FakeGuard(active=True)
+        en.on_tick()
+        check("M15: enforcement bloquea la OP1", len(bn.orders) == 0, str(bn.orders))
+
+        bn2, lgn2 = FakeBroker(magic=config.MAGIC_M15), FakeLogger()
+        en2 = m15_engine(bn2, lgn2)
+        en2.cfg = {}
+        en2.news = FakeGuard(active=True)
+        en2.on_tick()
+        check("M15: en observacion la OP1 SI abre", len(bn2.orders) == 1, str(bn2.orders))
+        obs2 = [m for t, m in lgn2.events if t == "NOTICIAS" and "observacion" in m]
+        check("M15: la apertura queda auditada [observacion]", len(obs2) == 1, str(obs2))
+    finally:
+        _ind.get_h4_structure, _ind.check_m15_breakout = _orig_h4, _orig_brk
+
+    # --- M15: el rescate L2 respeta el bloqueo; el L3-CRITICO esta exento ---
+    br, lgr = FakeBroker(magic=config.MAGIC_M15), FakeLogger()
+    er = m15_engine(br, lgr)
+    er.cfg = {"news_enforce": True}
+    er.news_active, er.news_block, er.news_reason = True, True, "CPI (USD) en 30 min"
+    er.now = 1_700_050_000
+    er.atr0, er.rsi0, er.struct_h4 = 2.0, 75.0, 0
+    br._price = 4000.0
+    legs_r = []
+    for i in range(3):
+        p = FakePos(2000 + i, mt5.POSITION_TYPE_SELL, 0.20, 3990.0,
+                    1_700_000_000 + i, "SMC Sell Entry", config.MAGIC_M15)
+        p.profit = -100.0            # dd ~307 > L2 (300), < L3 (800)
+        br._pos.append(p)
+        legs_r.append(p)
+    er._check_rescue(legs_r)
+    check("M15: rescate L2 bloqueado en ventana dura", len(br.orders) == 0, str(br.orders))
+    for p in legs_r:
+        p.profit = -300.0            # dd ~907 > L3 (800): defensa inmediata
+    er._check_rescue(legs_r)
+    check("M15: rescate L3-CRITICO exento del bloqueo", len(br.orders) == 1, str(br.orders))
+    if br.orders:
+        check("...con el comment L3-CRITICO", "L3-CRITICO" in br.orders[0]["comment"])
+        exc = [m for t, m in lgr.events if t == "NOTICIAS" and "excepcion" in m]
+        check("...y auditado como excepcion al bloqueo", len(exc) == 1, str(exc))
 
     print("\n" + "=" * 60)
     if fails:

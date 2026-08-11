@@ -24,7 +24,7 @@ import datetime
 import MetaTrader5 as mt5
 import pandas as pd
 
-from . import budget, config, indicators, ledger
+from . import budget, config, indicators, ledger, news
 
 # Defaults = valores input del MQL5 (fallback si falta la columna en bot_config)
 DEFAULTS = {
@@ -55,6 +55,11 @@ DEFAULTS = {
     "max_net_lots": 1.0,              # tope DURO de exposicion neta core (long-short); 0 = desactivado
     "max_rescue_legs": 3,             # cap de legs de Op4 por ciclo (acota el martingala)
     "use_recovery_h4_gate": True,     # no promediar (recovery/rescue) contra la estructura H4 confirmada
+    # --- NewsGuard Fase 1 (bloqueo duro por noticias rojas; ver bot/news.py) ---
+    "news_enforce": False,            # False = OBSERVACION: loguea lo que habria bloqueado, no bloquea
+    "news_pre_seconds": 7200,         # ventana previa: T-2h (una OP1 abierta despues llega al dato sin colchon)
+    "news_post_seconds": 3600,        # ventana posterior: T+1h (clusters se funden por solape de ventanas)
+    "news_currencies": "USD",         # divisas cuyas rojas cuentan (coma-separado); el oro es un trade de USD
     # --- Gobierno de margen (convivencia con el bot M5; ver bot/budget.py) ---
     "equity_weight": 0.80,            # fraccion del equity que dimensiona el lote de ESTE bot
     "margin_cap_pct": 60.0,           # techo de margen propio, en % del equity
@@ -87,6 +92,14 @@ class SentinelEngine:
         # Identidad por ROL de cada posicion del ciclo (persistida por
         # instancia; rehidratable desde los comments de MT5 tras un restart).
         self.cycle = ledger.CycleLedger(config.LEDGER_PATH, logger)
+
+        # NewsGuard (Fase 1): ventana dura alrededor de noticias rojas.
+        # Complementa al VCB: el VCB es reactivo (la vela ya exploto), este es
+        # predictivo (la vela va a explotar y esta agendada).
+        self.news = news.NewsGuard(config.NEWS_CALENDAR_PATH, logger)
+        self.news_active = False      # dentro de una ventana de noticia este tick
+        self.news_block = False       # ventana activa Y news_enforce=True
+        self.news_reason = None       # texto del evento que manda (HUD/logs)
 
         # Estado (globals del MQL5)
         self.last_recovery_close_time = 0
@@ -320,11 +333,26 @@ class SentinelEngine:
 
         En SHADOW_MODE res es None (no existe posicion real): no se registra y
         el sync() por comments cubriria cualquier hueco si algo quedo abierto.
+        Devuelve True si la apertura quedo confirmada y registrada.
         """
         if res is None:
-            return
+            return False
         if getattr(res, "retcode", None) == mt5.TRADE_RETCODE_DONE:
             self.cycle.register(getattr(res, "order", 0), role, covers=covers)
+            return True
+        return False
+
+    def _news_note(self, what):
+        """Traza de auditoria del NewsGuard: apertura ocurrida DENTRO de una
+        ventana de noticia. En modo observacion es el dato que calibra los
+        umbrales antes de activar el enforcement; con enforcement activo solo
+        puede ocurrir por la excepcion defensiva (rescate L3-CRITICO)."""
+        if not self.news_active:
+            return
+        modo = "excepcion al bloqueo" if self.news_block else "observacion"
+        self.log.write("NOTICIAS",
+                       f"{what} abierta en ventana de noticia [{modo}]: {self.news_reason}.",
+                       balance=self.b.account_balance())
 
     def _resize_hedge(self, entry, hedge):
         """Encoge el hedge al volumen remanente de la ENTRY (nunca lo agranda).
@@ -383,6 +411,11 @@ class SentinelEngine:
         gates = []
         max_sp = int(self._p("inp_max_spread"))
         gates.append(("Spread", str(spread), f"<= {max_sp}", spread <= max_sp))
+        if self.news_active:
+            estado = (self.news_reason or "ventana activa")
+            if not self._p("news_enforce"):
+                estado += " (obs)"
+            gates.append(("Noticias", estado, "fuera de ventana roja", not self.news_block))
 
         if side.startswith("BUY"):
             gates.append(("Estructura H4", _struct_txt(struct_h4), ">= 0 (alcista)", struct_h4 >= 0))
@@ -763,6 +796,12 @@ class SentinelEngine:
             ignore_rsi = True
             immediate = True  # L3 = ABRE AHORA (sin esperar distancia ni momentum)
 
+        # NewsGuard: en ventana dura no se martingalea... salvo el L3-CRITICO,
+        # que es la ultima linea de defensa de un ciclo ya muy herido y no
+        # debe morir por calendario (excepcion defensiva acordada por diseño).
+        if self.news_block and not immediate:
+            return
+
         # Op3 = ultima posicion core abierta (por tiempo)
         last_time = 0
         vol_op3 = price_op3 = 0.0
@@ -797,7 +836,8 @@ class SentinelEngine:
                     and self._net_cap_ok(vol_op3, mt5.ORDER_TYPE_SELL)
                     and self.gov.can_open(vol_op3, mt5.ORDER_TYPE_SELL, budget.KIND_ADDITIVE)):
                 res = self.b.market_order(mt5.ORDER_TYPE_SELL, vol_op3, comment)
-                self._register_open(res, ledger.ROLE_RESCUE)
+                if self._register_open(res, ledger.ROLE_RESCUE):
+                    self._news_note(comment)
                 self.last_rescue_time = self.now
         elif type_op3 == mt5.POSITION_TYPE_BUY:
             if immediate:
@@ -810,7 +850,8 @@ class SentinelEngine:
                     and self._net_cap_ok(vol_op3, mt5.ORDER_TYPE_BUY)
                     and self.gov.can_open(vol_op3, mt5.ORDER_TYPE_BUY, budget.KIND_ADDITIVE)):
                 res = self.b.market_order(mt5.ORDER_TYPE_BUY, vol_op3, comment)
-                self._register_open(res, ledger.ROLE_RESCUE)
+                if self._register_open(res, ledger.ROLE_RESCUE):
+                    self._news_note(comment)
                 self.last_rescue_time = self.now
 
     # ==============================================================
@@ -879,6 +920,15 @@ class SentinelEngine:
         hour = dt.hour
         is_friday_mode = (self._p("close_friday") and dow == 5 and hour >= int(self._p("friday_hour")))
         is_weekly_start_wait = (dow == 0 or (dow == 1 and hour < int(self._p("monday_start_hour"))))
+
+        # NewsGuard (Fase 1): ¿estamos dentro de la ventana dura de una roja?
+        # Igual que spread/VCB, SOLO condiciona aperturas aditivas: la gestion
+        # (hedge, cierres, trailing, healer, unwind) nunca se congela. Con
+        # news_enforce=False (default) es pura observacion: loguea y no toca.
+        self.news_active, self.news_reason = self.news.check(
+            self.now, int(self._p("news_pre_seconds")),
+            int(self._p("news_post_seconds")), self._p("news_currencies"))
+        self.news_block = self.news_active and bool(self._p("news_enforce"))
 
         # Snapshot read-only para la TUI (se publica aun si el tick sale temprano).
         self._build_hud(struct_h4, signal_m15, is_friday_mode, is_weekly_start_wait)
@@ -1049,7 +1099,7 @@ class SentinelEngine:
 
         # --- ESTADO 0: ENTRY (sin ciclo activo; huerfanos congelados no bloquean) ---
         if cycle_count == 0:
-            if self.spread_high or self.vol_breaker or self.close_only:
+            if self.spread_high or self.vol_breaker or self.close_only or self.news_block:
                 return
             if is_friday_mode or is_weekly_start_wait:
                 return
@@ -1061,16 +1111,18 @@ class SentinelEngine:
                 if self.rsi0 < int(self._p("entry_rsi_max")):
                     if self.gov.can_open(lots, mt5.ORDER_TYPE_BUY, budget.KIND_ADDITIVE):
                         res = self.b.market_order(mt5.ORDER_TYPE_BUY, lots, "SMC Buy Entry")
-                        self._register_open(res, ledger.ROLE_ENTRY)
+                        if self._register_open(res, ledger.ROLE_ENTRY):
+                            self._news_note("OP1 BUY")
             elif struct_h4 <= 0 and signal_m15 == -1 and self._is_price_good_entry(mt5.ORDER_TYPE_SELL):
                 if self.rsi0 > int(self._p("entry_rsi_min")):
                     if self.gov.can_open(lots, mt5.ORDER_TYPE_SELL, budget.KIND_ADDITIVE):
                         res = self.b.market_order(mt5.ORDER_TYPE_SELL, lots, "SMC Sell Entry")
-                        self._register_open(res, ledger.ROLE_ENTRY)
+                        if self._register_open(res, ledger.ROLE_ENTRY):
+                            self._news_note("OP1 SELL")
 
         # --- ESTADO 2: RECOVERY (ciclo = OP1 + hedge) ---
         elif cycle_count == 2:
-            if self.spread_high or self.vol_breaker or self.close_only:
+            if self.spread_high or self.vol_breaker or self.close_only or self.news_block:
                 return
             # Anti-espera v2 (OP3): tiempo minimo Y separacion por ATR del ultimo
             # leg. Antes era solo un timer fijo de 60s; ahora ademas exige que el
@@ -1103,7 +1155,8 @@ class SentinelEngine:
                 if (rtype is not None and self._net_cap_ok(recovery_lots, rtype)
                         and self.gov.can_open(recovery_lots, rtype, budget.KIND_ADDITIVE)):
                     res = self.b.market_order(rtype, recovery_lots, label)
-                    self._register_open(res, ledger.ROLE_RECOVERY)
+                    if self._register_open(res, ledger.ROLE_RECOVERY):
+                        self._news_note("Recovery")
 
         # --- ESTADO 3+: SENTINEL + TRAILING OP3 ---
         elif cycle_count >= 3:
