@@ -38,9 +38,18 @@ enmascara la incoherencia estructural.
 operan sin rol y rompen pares. `_closing_increases_exposure` no basta: con RECs abiertas,
 cerrar la OP1 verde no aumenta |neto| y pasa el filtro, pero huérfana al hedge igual.
 
-**How to apply:** el fix acordado es un **ledger de ciclo por roles** (ticket → rol +
-par `covers`), con dispatch por rol en vez de count: hedge monitor corre siempre para
-ENTRY sin hedge vivo; el par ENTRY↔HEDGE se desarma junto (P&L del par >= 0), no por
-piernas; Unwind/Healer excluyen miembros de par activo. Ver [[bot-design-constraints]] y
-[[healer-unwind-hedge-cascade]] (esta es la variante espejo: allí el Healer desarmaba,
-aquí el Unwind huérfana).
+**How to apply:** IMPLEMENTADO como **CycleLedger** (`bot/ledger.py`, persistido en
+`instances/cycle_ledger_<BOT_ID>_<USER_ID>.json`, regresión `python -m tests.test_ledger`):
+
+- Roles ENTRY/HEDGE/RECOVERY/RESCUE/ORPHAN por ticket, par explícito (`covers`);
+  rehidratación por comment de MT5 tras restart. La persistencia evita que un hedge
+  huérfano se re-empareje por inferencia con la ENTRY del ciclo siguiente.
+- Hedge monitor corre a CUALQUIER conteo (antes solo count==1); watchdog cubre
+  huérfanos rojos > hedge_dist; `_resize_hedge` encoge el hedge al remanente de la ENTRY.
+- Unwind y Healer excluyen miembros de par intacto (el par solo se desarma completo);
+  la máquina de estados usa `cycle_legs` (sin huérfanos) como profundidad.
+- Huérfano solitario se promueve a ENTRY solo cuando NO queda ningún leg de ciclo vivo.
+- El backtest usa ledger en memoria (no toca el JSON de la instancia viva).
+
+Ver [[bot-design-constraints]] y [[healer-unwind-hedge-cascade]] (esta es la variante
+espejo: allí el Healer desarmaba, aquí el Unwind huérfana).

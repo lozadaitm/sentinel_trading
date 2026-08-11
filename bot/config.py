@@ -116,6 +116,13 @@ def validate_identity():
 # = auth.users.id en Supabase. Se pasa por .env de la instancia.
 USER_ID = os.environ.get("USER_ID", ADMIN_USER_UUID)
 
+# Persistencia del CycleLedger (identidad por rol de cada posicion del ciclo;
+# ver bot/ledger.py). Un archivo por instancia (bot + usuario): sobrevive
+# restarts sin depender de red y no colisiona entre procesos de la misma PC.
+LEDGER_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)), "instances",
+    f"cycle_ledger_{BOT_ID}_{USER_ID}.json")
+
 # ==================================================================
 # ATTACH A METATRADER 5  (por-instancia; vacio = terminal por defecto)
 # Permite que cada proceso ataque el terminal/cuenta Vantage correcta.

@@ -1,7 +1,12 @@
 """SentinelEngine: motor M15, derivado del EA MQL5 'M15 Gold Sentinel HyperGrinder v20.0'.
 
-Maquina de estados por numero de posiciones (0/1/2/3+) + subsistemas
-transversales (Healer, Profit Banking). on_tick() replica OnTick del MQL5.
+Maquina de estados derivada de los ROLES del CycleLedger (bot/ledger.py):
+cada posicion tiene identidad (ENTRY/HEDGE/RECOVERY/RESCUE/ORPHAN) y el par
+OP1<->OP2 es atomico. El conteo (0/1/2/3+) del MQL5 original se conserva como
+profundidad del CICLO (cycle_legs: excluye huerfanos), no del magic entero:
+contar posiciones sin identidad re-etiquetaba hedges huerfanos como OP1 y
+construia ciclos sobre bases falsas (ver docs/memory/
+unwind-orphans-hedge-count-state). on_tick() replica OnTick del MQL5.
 Los parametros se reciben en self.cfg (cargados de bot_config).
 
 El scalper M5 que el EA original llevaba embebido ("Bio-Reactor / Smart
@@ -19,7 +24,7 @@ import datetime
 import MetaTrader5 as mt5
 import pandas as pd
 
-from . import budget, config, indicators
+from . import budget, config, indicators, ledger
 
 # Defaults = valores input del MQL5 (fallback si falta la columna en bot_config)
 DEFAULTS = {
@@ -78,6 +83,10 @@ class SentinelEngine:
         self.gov = budget.MarginGovernor(
             broker, lambda: self.cfg, budget.ROLE_SENIOR,
             peer_magics=config.PEER_MAGICS, logger=logger)
+
+        # Identidad por ROL de cada posicion del ciclo (persistida por
+        # instancia; rehidratable desde los comments de MT5 tras un restart).
+        self.cycle = ledger.CycleLedger(config.LEDGER_PATH, logger)
 
         # Estado (globals del MQL5)
         self.last_recovery_close_time = 0
@@ -185,13 +194,10 @@ class SentinelEngine:
             return self.struct_h4 >= 0
         return self.struct_h4 <= 0
 
-    def _rescue_leg_count(self):
-        """Cuenta legs de Op4 abiertos (por comment), para acotar el martingala."""
-        n = 0
-        for p in self.b.positions():
-            if "Op 4" in (getattr(p, "comment", "") or ""):
-                n += 1
-        return n
+    def _rescue_leg_count(self, legs):
+        """Cuenta legs de Op4 vivos DEL CICLO (por rol), para acotar el martingala."""
+        return sum(1 for p in legs
+                   if self.cycle.role_of(p.ticket) == ledger.ROLE_RESCUE)
 
     # ==============================================================
     # Lotaje y cierre total
@@ -298,11 +304,51 @@ class SentinelEngine:
                 p.price_current, p.volume, self.b.account_balance(), ticket=p.ticket)
             return False
 
-        # Cobertura confirmada: recien ahora es seguro soltar el SL para que el
-        # par Op1+Hedge quede congelado y lo gestionen los subsistemas de cesta.
+        # Cobertura confirmada: el par queda registrado en el ledger (quien
+        # cubre a quien). Sin este vinculo, un restart re-emparejaria por
+        # inferencia y un hedge de un ciclo muerto podria adoptar la OP1 nueva.
+        self._register_open(res, ledger.ROLE_HEDGE, covers=p.ticket)
+
+        # Recien ahora es seguro soltar el SL para que el par Op1+Hedge quede
+        # congelado y lo gestionen los subsistemas de cesta.
         if p.sl != 0:
             self.b.modify_sl(p, 0)
         return True
+
+    def _register_open(self, res, role, covers=None):
+        """Registra en el ledger una apertura CONFIRMADA por el broker.
+
+        En SHADOW_MODE res es None (no existe posicion real): no se registra y
+        el sync() por comments cubriria cualquier hueco si algo quedo abierto.
+        """
+        if res is None:
+            return
+        if getattr(res, "retcode", None) == mt5.TRADE_RETCODE_DONE:
+            self.cycle.register(getattr(res, "order", 0), role, covers=covers)
+
+    def _resize_hedge(self, entry, hedge):
+        """Encoge el hedge al volumen remanente de la ENTRY (nunca lo agranda).
+
+        Si el Healer amputo parte de la ENTRY, el exceso del hedge ya no
+        congela nada: es exposicion direccional nueva disfrazada de cobertura.
+        Lo realizado por el recorte entra a cycle_realized para que el freeze
+        del Unwind lo vea (mismo tratamiento que una amputacion del Healer).
+        """
+        step = self.b.volume_step()
+        excess = hedge.volume - entry.volume
+        if excess < step - 1e-9:
+            return
+        import math
+        lots = math.floor(excess / step + 1e-9) * step
+        frac = lots / hedge.volume
+        res = self.b.close_partial(hedge, lots, "Hedge Resize")
+        if res is None or getattr(res, "retcode", None) == mt5.TRADE_RETCODE_DONE:
+            self.cycle_realized += (hedge.profit + hedge.swap) * frac
+            self.log.write(
+                "PROTECCION",
+                f"Hedge ajustado al remanente de la OP1 (ticket #{entry.ticket}): "
+                f"cerrados {lots:.2f} lotes de exceso.",
+                hedge.price_current, lots, self.b.account_balance(), ticket=hedge.ticket)
 
     # ==============================================================
     # HUD (snapshot read-only para la TUI; NO afecta el trading)
@@ -514,12 +560,24 @@ class SentinelEngine:
         """
         protect_cover = (self.cycle_realized + self._basket_net_profit()) <= 0
 
+        positions = self.b.positions()
+        # Rol: los miembros de un par intacto (ENTRY<->HEDGE, huerfano<->cover)
+        # son intocables mientras el ciclo siga en rojo. La regla estructural
+        # de abajo no basta sola: con N recoveries del lado de la ENTRY, cerrar
+        # la ENTRY (o su hedge) puede REDUCIR |neto| y pasar el filtro, pero
+        # huerfana al par igual (asi murio la OP1s del 11-ago: -1,332 de
+        # amputacion financiada por el churn). El par se congela completo.
+        pair_frozen = self.cycle.pair_members(positions) if protect_cover else set()
+
         # Peor leg por DINERO REAL = profit + swap (antes solo miraba p.profit e
         # ignoraba el swap acumulado, que en holds largos puede ser material).
         worst = None
         worst_money = 1e9
         cover_skipped = 0
-        for p in self.b.positions():
+        for p in positions:
+            if p.ticket in pair_frozen:
+                cover_skipped += 1
+                continue
             if protect_cover and self._closing_increases_exposure(p):
                 cover_skipped += 1
                 continue
@@ -589,6 +647,17 @@ class SentinelEngine:
         al perdedor desnudo (causa del -760 observado). Ahora el unwind respeta el
         congelamiento: el hedge solo se cierra cuando el saldo TOTAL es positivo.
 
+        PARES (rol): los miembros de un par intacto (ENTRY<->HEDGE) NUNCA se
+        bancan sueltos, ni siquiera con el freeze abierto. La auditoria 6-11 ago
+        mostro los dos modos de fallo: (a) bancar la OP1 verde dejaba el hedge
+        rojo huerfano, que la maquina re-etiquetaba como OP1 y cubria de nuevo
+        (hedge-sobre-hedge); (b) bancar el hedge verde con la OP1 roja flotando
+        lo reabria al tick siguiente en un loop de scalping (12+ vueltas el
+        10-ago) mientras el freeze seguia abierto por los verdes del churn. Un
+        par solo se desarma COMPLETO: aqui si su P&L conjunto es positivo, o en
+        _close_all cuando el TOTAL de la cesta alcanza el target. Bancables
+        sueltos quedan RECOVERY/RESCUE y los verdes sin par.
+
         RF-C corregido: la condicion de dinero y la posicion elegida son la MISMA
         (se banca la ganadora mas rica que cumpla el umbral, no se mezclan).
         RF-F: comision ida+vuelta.
@@ -609,38 +678,71 @@ class SentinelEngine:
             return
 
         current_atr = self._effective_atr()
-        best_pos = None
+        atr_mult = float(self._p("unwind_atr_mult"))
+        floor = float(self._p("unwind_money_floor"))
+        pair_tickets = self.cycle.pair_members(positions)
+
+        best_single = None
+        best_pair = None
         best_money = -1e18
         for p in positions:
+            if p.ticket in pair_tickets:
+                continue  # miembro de par intacto: solo se desarma junto
             money = p.profit + p.swap - self._round_trip_commission(p.volume)
             if money <= 0:
                 continue
             dist = abs(p.price_current - p.price_open) / current_atr if current_atr else 0.0
-            qualifies = (dist >= float(self._p("unwind_atr_mult"))
-                         or money >= float(self._p("unwind_money_floor")))
-            if qualifies and money > best_money:
+            if (dist >= atr_mult or money >= floor) and money > best_money:
                 best_money = money
-                best_pos = p
+                best_single, best_pair = p, None
 
-        if best_pos is not None:
-            banked_ticket = best_pos.ticket
-            self.b.close_position(best_pos, "Unwind Profit Banking")
-            self.cycle_realized += best_pos.profit + best_pos.swap  # B: acumula lo realizado del ciclo
+        for leg, hedge in self.cycle.pairs(positions):
+            money = (leg.profit + leg.swap + hedge.profit + hedge.swap
+                     - self._round_trip_commission(leg.volume)
+                     - self._round_trip_commission(hedge.volume))
+            if money <= 0:
+                continue  # par congelado en rojo: intocable
+            dist = max(abs(leg.price_current - leg.price_open),
+                       abs(hedge.price_current - hedge.price_open))
+            dist = dist / current_atr if current_atr else 0.0
+            if (dist >= atr_mult or money >= floor) and money > best_money:
+                best_money = money
+                best_single, best_pair = None, (leg, hedge)
+
+        if best_single is not None:
+            banked_ticket = best_single.ticket
+            self.b.close_position(best_single, "Unwind Profit Banking")
+            self.cycle_realized += best_single.profit + best_single.swap  # B: acumula lo realizado del ciclo
             self.log.write("UNWIND", f"Profit Banking. Money: {best_money:.2f}",
                            balance=self.b.account_balance(), ticket=banked_ticket)
+        elif best_pair is not None:
+            leg, hedge = best_pair
+            # Primero el miembro ROJO: si el segundo cierre fallara, lo que
+            # queda vivo es un verde desnudo (benigno), nunca un rojo huerfano.
+            first, second = ((leg, hedge)
+                             if (leg.profit + leg.swap) <= (hedge.profit + hedge.swap)
+                             else (hedge, leg))
+            for p in (first, second):
+                self.b.close_position(p, "Unwind Profit Banking")
+                self.cycle_realized += p.profit + p.swap
+            self.log.write("UNWIND",
+                           f"Profit Banking de PAR completo (tickets #{leg.ticket} + "
+                           f"#{hedge.ticket}). Money conjunto: {best_money:.2f}",
+                           balance=self.b.account_balance(), ticket=leg.ticket)
 
     # ==============================================================
     # SENTINEL OP4 (Rescate)
     # ==============================================================
-    def _check_rescue(self):
+    def _check_rescue(self, positions):
+        """OP4. `positions` son los legs del CICLO (cycle_legs): los huerfanos y
+        sus coberturas no cuentan profundidad ni pueden ser el 'op3' de anclaje."""
         if not self._p("use_rescue_mode"):
             return
         if self.spread_high or self.vol_breaker or self.close_only:
             return  # no abrir martingala con spread alto, vela anomala (VCB) ni en close-only
-        positions = self.b.positions()
         if len(positions) < 3:
             return
-        if self._rescue_leg_count() >= int(self._p("max_rescue_legs")):
+        if self._rescue_leg_count(positions) >= int(self._p("max_rescue_legs")):
             return  # cap de legs de Op4: acota el martingala (anti-blowup)
         if self.now - self.last_rescue_time < int(self._p("rescue_cooldown")):
             return  # anti-spam (sobre todo en L3 "abre ahora")
@@ -694,7 +796,8 @@ class SentinelEngine:
             if (signal and self._h4_gate_ok(mt5.ORDER_TYPE_SELL)
                     and self._net_cap_ok(vol_op3, mt5.ORDER_TYPE_SELL)
                     and self.gov.can_open(vol_op3, mt5.ORDER_TYPE_SELL, budget.KIND_ADDITIVE)):
-                self.b.market_order(mt5.ORDER_TYPE_SELL, vol_op3, comment)
+                res = self.b.market_order(mt5.ORDER_TYPE_SELL, vol_op3, comment)
+                self._register_open(res, ledger.ROLE_RESCUE)
                 self.last_rescue_time = self.now
         elif type_op3 == mt5.POSITION_TYPE_BUY:
             if immediate:
@@ -706,7 +809,8 @@ class SentinelEngine:
             if (signal and self._h4_gate_ok(mt5.ORDER_TYPE_BUY)
                     and self._net_cap_ok(vol_op3, mt5.ORDER_TYPE_BUY)
                     and self.gov.can_open(vol_op3, mt5.ORDER_TYPE_BUY, budget.KIND_ADDITIVE)):
-                self.b.market_order(mt5.ORDER_TYPE_BUY, vol_op3, comment)
+                res = self.b.market_order(mt5.ORDER_TYPE_BUY, vol_op3, comment)
+                self._register_open(res, ledger.ROLE_RESCUE)
                 self.last_rescue_time = self.now
 
     # ==============================================================
@@ -796,14 +900,30 @@ class SentinelEngine:
                            balance=self.b.account_balance())
             self.vol_breaker_prev = self.vol_breaker
 
+        # Identidad por ROL: reconcilia el ledger ANTES de los subsistemas,
+        # para que Unwind/Healer conozcan los pares vigentes de este tick
+        # (adopcion por comment tras un restart, hedges viudos -> ORPHAN,
+        # promocion de huerfano solitario a ENTRY).
+        self.cycle.sync(self.b.positions())
+
         # Subsistemas transversales
         self._check_healing()
         self._profit_banking()
 
         # Todas las posiciones del magic son cesta core: el grinder salio del
         # Sentinel a su propio proceso (bot/strategy_m5.py), con su propio magic.
+        # Se relee DESPUES de los subsistemas (pueden haber cerrado legs).
         core_positions = self.b.positions()
         my_positions = core_count = len(core_positions)
+
+        # Vistas por ROL. La profundidad de la maquina de estados es la del
+        # CICLO (cycle_legs: sin huerfanos ni sus coberturas): un hedge viudo
+        # de un ciclo muerto no debe fabricar Recovery/OP4 ni bloquear nada.
+        entry = self.cycle.entry_pos(core_positions)
+        entry_hedge = (self.cycle.hedge_of(entry.ticket, core_positions)
+                       if entry is not None else None)
+        cycle_legs = self.cycle.cycle_legs(core_positions)
+        cycle_count = len(cycle_legs)
 
         # Red de seguridad de ciclo (B/C): si NO hay cesta core (cerro por _close_all,
         # stop-out del broker o SL), reinicia el realizado del ciclo y marca rebaseline
@@ -875,8 +995,60 @@ class SentinelEngine:
             self._close_all("Viernes Close")
             return
 
-        # --- ESTADO 0: ENTRY ---
-        if core_count == 0:
+        # Distancia de cobertura vigente (comun al monitor y al watchdog)
+        atr_points = current_atr / point
+        dynamic_dist = atr_points * float(self._p("hedge_atr_mult"))
+        active_hedge_dist = max(float(self._p("hedge_dist")), dynamic_dist)
+
+        # --- HEDGE MONITOR (por ROL: corre a CUALQUIER conteo) ---
+        # Antes vivia en el ESTADO 1 (count==1): una OP1 que se quedaba sin
+        # cobertura con la cesta ya profunda (op3/op4 abiertas) era imposible
+        # de cubrir. Ahora la ENTRY sin hedge vivo se congela a hedge_dist sin
+        # importar cuantos legs mas existan.
+        if entry is not None:
+            if entry.type == mt5.POSITION_TYPE_BUY:
+                profit_pts = (entry.price_current - entry.price_open) / point
+                loss_pts = (entry.price_open - entry.price_current) / point
+            else:
+                profit_pts = (entry.price_open - entry.price_current) / point
+                loss_pts = (entry.price_current - entry.price_open) / point
+
+            if entry_hedge is None:
+                if loss_pts >= active_hedge_dist:
+                    self._open_hedge(entry)
+            else:
+                # Invariante del par: el hedge nunca mas grande que la ENTRY
+                # (si el Healer amputo parte de la ENTRY, se recorta el exceso).
+                self._resize_hedge(entry, entry_hedge)
+
+            # Smart trail: solo con la entrada SOLA (comportamiento original
+            # del ESTADO 1; con mas legs la gestiona la cesta).
+            if (core_count == 1 and self._p("use_smart_trail")
+                    and profit_pts > (current_atr * float(self._p("trail_activate"))) / point):
+                trail_dist = current_atr * float(self._p("trail_dist_atr"))
+                if entry.type == mt5.POSITION_TYPE_BUY:
+                    new_sl = round(entry.price_current - trail_dist, digits)
+                    if new_sl > entry.price_open and (entry.sl == 0 or new_sl > entry.sl):
+                        self.b.modify_sl(entry, new_sl)
+                else:
+                    new_sl = round(entry.price_current + trail_dist, digits)
+                    if new_sl < entry.price_open and (entry.sl == 0 or new_sl < entry.sl):
+                        self.b.modify_sl(entry, new_sl)
+
+        # --- WATCHDOG de exposicion desnuda (huerfanos sin cobertura) ---
+        # Red final para lo que el ledger no vio nacer (restarts, cierres
+        # manuales): un leg huerfano en rojo mas alla de la distancia de hedge
+        # se congela igual que una OP1. Orden protectora: sin pre-filtros.
+        for orphan in self.cycle.naked_orphans(core_positions):
+            if orphan.type == mt5.POSITION_TYPE_BUY:
+                orphan_loss = (orphan.price_open - orphan.price_current) / point
+            else:
+                orphan_loss = (orphan.price_current - orphan.price_open) / point
+            if orphan_loss >= active_hedge_dist:
+                self._open_hedge(orphan)
+
+        # --- ESTADO 0: ENTRY (sin ciclo activo; huerfanos congelados no bloquean) ---
+        if cycle_count == 0:
             if self.spread_high or self.vol_breaker or self.close_only:
                 return
             if is_friday_mode or is_weekly_start_wait:
@@ -888,49 +1060,23 @@ class SentinelEngine:
             if struct_h4 >= 0 and signal_m15 == 1 and self._is_price_good_entry(mt5.ORDER_TYPE_BUY):
                 if self.rsi0 < int(self._p("entry_rsi_max")):
                     if self.gov.can_open(lots, mt5.ORDER_TYPE_BUY, budget.KIND_ADDITIVE):
-                        self.b.market_order(mt5.ORDER_TYPE_BUY, lots, "SMC Buy Entry")
+                        res = self.b.market_order(mt5.ORDER_TYPE_BUY, lots, "SMC Buy Entry")
+                        self._register_open(res, ledger.ROLE_ENTRY)
             elif struct_h4 <= 0 and signal_m15 == -1 and self._is_price_good_entry(mt5.ORDER_TYPE_SELL):
                 if self.rsi0 > int(self._p("entry_rsi_min")):
                     if self.gov.can_open(lots, mt5.ORDER_TYPE_SELL, budget.KIND_ADDITIVE):
-                        self.b.market_order(mt5.ORDER_TYPE_SELL, lots, "SMC Sell Entry")
+                        res = self.b.market_order(mt5.ORDER_TYPE_SELL, lots, "SMC Sell Entry")
+                        self._register_open(res, ledger.ROLE_ENTRY)
 
-        # --- ESTADO 1: HEDGE MONITOR ---
-        elif core_count == 1:
-            p = core_positions[0]
-            if p.type == mt5.POSITION_TYPE_BUY:
-                profit_pts = (p.price_current - p.price_open) / point
-                loss_pts = (p.price_open - p.price_current) / point
-            else:
-                profit_pts = (p.price_open - p.price_current) / point
-                loss_pts = (p.price_current - p.price_open) / point
-
-            if self._p("use_smart_trail") and profit_pts > (current_atr * float(self._p("trail_activate"))) / point:
-                trail_dist = current_atr * float(self._p("trail_dist_atr"))
-                if p.type == mt5.POSITION_TYPE_BUY:
-                    new_sl = round(p.price_current - trail_dist, digits)
-                    if new_sl > p.price_open and (p.sl == 0 or new_sl > p.sl):
-                        self.b.modify_sl(p, new_sl)
-                else:
-                    new_sl = round(p.price_current + trail_dist, digits)
-                    if new_sl < p.price_open and (p.sl == 0 or new_sl < p.sl):
-                        self.b.modify_sl(p, new_sl)
-
-            atr_points = current_atr / point
-            dynamic_dist = atr_points * float(self._p("hedge_atr_mult"))
-            active_hedge_dist = max(float(self._p("hedge_dist")), dynamic_dist)
-
-            if loss_pts >= active_hedge_dist:
-                self._open_hedge(p)
-
-        # --- ESTADO 2: RECOVERY ---
-        elif core_count == 2:
+        # --- ESTADO 2: RECOVERY (ciclo = OP1 + hedge) ---
+        elif cycle_count == 2:
             if self.spread_high or self.vol_breaker or self.close_only:
                 return
             # Anti-espera v2 (OP3): tiempo minimo Y separacion por ATR del ultimo
             # leg. Antes era solo un timer fijo de 60s; ahora ademas exige que el
             # precio se haya movido >= ATR*spacing, para no apilar recovery en el
             # mismo nivel (clustering) durante ruido.
-            last_leg = max(core_positions, key=lambda q: q.time)
+            last_leg = max(cycle_legs, key=lambda q: q.time)
             if self.now - last_leg.time < int(self._p("min_tech_wait")):
                 return
             ref_price = self.b.ask()
@@ -956,16 +1102,19 @@ class SentinelEngine:
                     rtype = None
                 if (rtype is not None and self._net_cap_ok(recovery_lots, rtype)
                         and self.gov.can_open(recovery_lots, rtype, budget.KIND_ADDITIVE)):
-                    self.b.market_order(rtype, recovery_lots, label)
+                    res = self.b.market_order(rtype, recovery_lots, label)
+                    self._register_open(res, ledger.ROLE_RECOVERY)
 
         # --- ESTADO 3+: SENTINEL + TRAILING OP3 ---
-        elif core_count >= 3:
-            self._check_rescue()            # RF-D: corre con >=3 core (no solo ==3)
+        elif cycle_count >= 3:
+            self._check_rescue(cycle_legs)  # RF-D: corre con >=3 legs de ciclo (no solo ==3)
 
             if self._p("use_op3_trail"):
+                # 'Op3' = ultimo leg DEL CICLO (un huerfano o su cobertura,
+                # aunque sean mas recientes, no son el leg a trailear).
                 op3 = None
                 last_t = 0
-                for p in core_positions:
+                for p in cycle_legs:
                     if p.time > last_t:
                         last_t = p.time
                         op3 = p

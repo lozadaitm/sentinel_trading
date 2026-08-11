@@ -7,6 +7,7 @@ cambios -> el backtest prueba el mismo codigo que el bot en vivo.
 
 from types import SimpleNamespace
 
+from bot import ledger
 from bot.strategy import SentinelEngine
 
 
@@ -14,6 +15,9 @@ class BacktestEngine(SentinelEngine):
     def __init__(self, broker, logger, market):
         super().__init__(broker, logger)
         self.market = market
+        # Ledger EN MEMORIA: un backtest jamas debe leer ni pisar el estado
+        # persistido de la instancia viva (config.LEDGER_PATH).
+        self.cycle = ledger.CycleLedger(path=None, logger=logger)
 
     def _fetch_tick(self):
         # _compute_buffers solo usa tick.time; el precio se lee via broker.bid/ask.

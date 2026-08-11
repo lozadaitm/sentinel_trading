@@ -8,4 +8,4 @@
 - [Logging: taxonomía y ticket](logging-taxonomy-and-ticket.md) — log_types de bot_logs, columna ticket, aperturas en broker vs cierres en strategy; drift ts/created_at
 - [Supabase + multi-instancia](supabase-multi-instance-model.md) — 1 proceso=1 usuario=1 cuenta; service-role bypassa RLS; is_active=false es close-only (no pause duro)
 - [Multi-bot: gobierno de margen](multi-bot-margin-governance.md) — M15 senior con Hedge Lock inbloqueable, M5 junior cede margen; coordinación vía magics en MT5, no por DB
-- [Unwind huérfana el hedge + estado por conteo](unwind-orphans-hedge-count-state.md) — auditoría 6-11 ago: Unwind banca la OP1 verde, el hedge huérfano se re-etiqueta como OP1 (hedge-sobre-hedge, churn OP4); fix acordado: ledger de ciclo por roles
+- [Unwind huérfana el hedge + estado por conteo](unwind-orphans-hedge-count-state.md) — auditoría 6-11 ago: Unwind bancaba la OP1 verde, el hedge huérfano se re-etiquetaba como OP1 (hedge-sobre-hedge, churn OP4); fix implementado: CycleLedger por roles (bot/ledger.py)
