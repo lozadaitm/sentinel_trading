@@ -107,11 +107,17 @@ def setup(logger=None, engine_cls=None):
     engine.init_history_cursor()
     engine.user_email = db.get_user_email()  # una vez al arrancar (para identificar la instancia)
 
-    # Saldo inicial para el dashboard (bot_state): reusa el ya persistido si
-    # existe (sobrevive a restarts), si no lo fija al balance actual.
-    engine.initial_balance = db.get_state_initial_balance()
+    # Saldo inicial (base del objetivo de ganancia): reusa el ya persistido si
+    # existe (sobrevive a restarts), si no lo fija al balance actual. El ancla
+    # de flujos (last_flow_ticket) evita re-contar depositos/retiros ya
+    # incorporados a la base; sin ancla previa se parte del ultimo deal de
+    # flujo existente (el balance actual ya los refleja todos).
+    engine.initial_balance, engine.last_flow_ticket = db.get_state_flow_info()
     if engine.initial_balance is None:
         engine.initial_balance = broker.account_balance()
+    if engine.last_flow_ticket is None:
+        engine.last_flow_ticket = max(
+            (d.ticket for d in broker.capital_flows(0)), default=0)
 
     # Reconciliacion de bot_positions: si alguna quedo marcada OPEN pero ya no
     # existe en MT5 (se cerro con el bot apagado), se cierra ahora con el
@@ -206,6 +212,28 @@ def _closed_position_row(broker, ticket):
         row["profit"] = total_profit
         row["swap"] = total_swap
     return row
+
+
+def _reconcile_capital_flows(engine, logger):
+    """Incorpora a la base los depositos/retiros posteriores al ancla.
+
+    La ganancia medida debe ser SOLO la del trading:
+        profit = equity - (inicial + flujos externos netos)
+    Un deposito sube la base (la ganancia no salta con dinero fresco) y un
+    retiro la baja (retirar no hunde el % del objetivo). El ancla por ticket
+    (bot_state.last_flow_ticket) evita el doble conteo entre heartbeats y
+    restarts; la persistencia va en el mismo report_state del heartbeat.
+    """
+    flows = engine.b.capital_flows(engine.last_flow_ticket)
+    if not flows:
+        return
+    net = sum(d.profit for d in flows)
+    engine.initial_balance += net
+    engine.last_flow_ticket = max(d.ticket for d in flows)
+    logger.write("SYSTEM",
+                 f"Flujo de capital detectado ({len(flows)} mov., neto {net:+.2f}): "
+                 f"base del objetivo ajustada a {engine.initial_balance:.2f}.",
+                 balance=engine.b.account_balance())
 
 
 def _check_profit_target(db, engine, logger, info):
@@ -310,6 +338,10 @@ def trading_loop(db, engine, logger, stop_event=None):
                 # Snapshot en vivo para el dashboard (bot_state). Best-effort;
                 # nunca debe tumbar el bucle si Supabase/MT5 fallan.
                 try:
+                    _reconcile_capital_flows(engine, logger)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
                     info = mt5.account_info()
                     if info:
                         db.report_state(
@@ -321,6 +353,7 @@ def trading_loop(db, engine, logger, stop_event=None):
                             floating_pnl=info.equity - info.balance,
                             open_positions=len(engine.b.positions()),
                             initial_balance=engine.initial_balance,
+                            last_flow_ticket=engine.last_flow_ticket,
                         )
                         _check_profit_target(db, engine, logger, info)
                 except Exception:  # noqa: BLE001

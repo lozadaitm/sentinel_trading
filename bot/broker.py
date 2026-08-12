@@ -6,6 +6,7 @@ SHADOW_MODE: si esta activo, las operaciones de escritura se loguean
 pero NO se envian al broker.
 """
 
+import datetime
 from types import SimpleNamespace
 
 import MetaTrader5 as mt5
@@ -366,6 +367,25 @@ class Broker:
     def history_deals(self, from_dt, to_dt):
         deals = mt5.history_deals_get(from_dt, to_dt)
         return list(deals) if deals else []
+
+    def capital_flows(self, min_ticket, days=45):
+        """Deals de deposito/retiro/credito de la CUENTA (DEAL_TYPE_BALANCE /
+        DEAL_TYPE_CREDIT) con ticket > min_ticket, mirando `days` hacia atras.
+
+        El ancla es el TICKET (creciente por cuenta) y no el tiempo: los deals
+        de MT5 vienen en hora del servidor y anclar por reloj local arriesga
+        saltarse o duplicar una ventana de horas. La ventana de dias solo
+        acota la consulta (con margen por TZ); un flujo mas viejo que `days`
+        con el bot apagado todo ese tiempo se perderia (raro; asumido).
+        """
+        now = datetime.datetime.now()
+        deals = mt5.history_deals_get(
+            now - datetime.timedelta(days=days),
+            now + datetime.timedelta(days=2),
+        ) or []
+        kinds = (mt5.DEAL_TYPE_BALANCE, mt5.DEAL_TYPE_CREDIT)
+        floor = int(min_ticket or 0)
+        return [d for d in deals if d.type in kinds and d.ticket > floor]
 
     def history_deals_for_position(self, ticket):
         """Todos los deals (IN + OUT/OUT_BY) de una posicion por su ticket.

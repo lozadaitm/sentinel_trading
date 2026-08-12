@@ -198,7 +198,13 @@ CREATE TABLE IF NOT EXISTS public.bot_state (
     margin_free     DOUBLE PRECISION,
     floating_pnl    DOUBLE PRECISION,
     open_positions  INTEGER,
+    -- Base del objetivo de ganancia: capturado de MT5 en la primera corrida y
+    -- AJUSTADO despues por depositos/retiros (deals BALANCE/CREDIT) para que
+    -- la ganancia medida sea solo la del trading. Ver migrations/005.
     initial_balance DOUBLE PRECISION,
+    -- Ancla de reconciliacion de flujos: ticket del ultimo deal de
+    -- deposito/retiro ya incorporado a initial_balance.
+    last_flow_ticket BIGINT,
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (user_id, bot_id)
 );

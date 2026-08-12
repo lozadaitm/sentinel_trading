@@ -91,7 +91,10 @@ Cuatro tablas en el schema `public`. Todas con FK a `auth.users(id)` y RLS por u
 
 **`bot_state`** — snapshot en vivo, 1 fila por usuario:
 - `balance`, `equity`, `margin_used`, `margin_free`, `floating_pnl` DOUBLE, `open_positions` INT,
-  `initial_balance` DOUBLE, `symbol`, `updated_at`. RLS `FOR SELECT` al dueño.
+  `initial_balance` DOUBLE, `last_flow_ticket` BIGINT, `symbol`, `updated_at`. RLS `FOR SELECT` al dueño.
+- `initial_balance` se captura de MT5 en la primera corrida y se **auto-ajusta por
+  depósitos/retiros** (deals BALANCE/CREDIT; migración 005): la ganancia mostrada es solo la del
+  trading. `last_flow_ticket` es el ancla interna de esa reconciliación (no mostrar en UI).
 - Fuente de: saldo actual, equity, **balance en uso (margen)**, contador rápido de operaciones
   abiertas, ganancias totales (`equity - initial_balance`).
 

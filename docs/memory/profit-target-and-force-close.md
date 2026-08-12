@@ -16,6 +16,12 @@ en Supabase): el usuario configura en el dashboard un **% de ganancia objetivo**
   `bot_state.initial_balance` auto-capturado de MT5 en la primera corrida (mecanismo que
   ya existía), sin pedir el fondeo en el dashboard.
 - La ganancia se mide en **EQUITY** (incluye flotante): `(equity - base) / base * 100`.
+- **La base se auto-ajusta por depósitos/retiros** (migración `005_capital_flows.sql`):
+  cada heartbeat, `_reconcile_capital_flows` busca deals `DEAL_TYPE_BALANCE/CREDIT` con
+  ticket > `bot_state.last_flow_ticket` (`broker.capital_flows`, ventana 45 días) y los
+  suma a `initial_balance` (depósito sube la base, retiro la baja) → la ganancia medida
+  es solo la del trading. El ancla es el **ticket** (no la fecha) para esquivar la TZ del
+  servidor MT5; se persiste en el mismo `report_state`.
 - Chequeo en `bot/main.py::_check_profit_target` (cada heartbeat, ~15 s). Al alcanzarlo:
   1. **Claim atómico** de `target_reached_at` (`db.claim_profit_target`: UPDATE ... WHERE
      target_reached_at IS NULL) — solo un motor gana aunque m15 y m5 crucen a la vez → un

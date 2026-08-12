@@ -223,32 +223,39 @@ class Database:
     # ==============================================================
     # Snapshot en vivo para el dashboard (bot_state)
     # ==============================================================
-    def get_state_initial_balance(self):
-        """initial_balance ya persistido en bot_state, o None si no hay fila aun.
+    def get_state_flow_info(self):
+        """(initial_balance, last_flow_ticket) ya persistidos en bot_state.
 
-        Se lee una vez al arrancar para no resetear el saldo inicial en cada
-        restart del proceso (ver bot/main.py::setup).
+        (None, None) si no hay fila aun. Se lee una vez al arrancar para no
+        resetear la base ni re-contar flujos en cada restart del proceso
+        (ver bot/main.py::setup y _reconcile_capital_flows).
         """
         if self.client is None:
-            return None
+            return None, None
         try:
             res = (
                 self.client.table("bot_state")
-                .select("initial_balance")
+                .select("initial_balance,last_flow_ticket")
                 .eq("user_id", config.USER_ID)
                 .eq("bot_id", config.BOT_ID)
                 .limit(1)
                 .execute()
             )
             rows = res.data or []
-            if rows and rows[0].get("initial_balance") is not None:
-                return float(rows[0]["initial_balance"])
+            if rows:
+                ib = rows[0].get("initial_balance")
+                tk = rows[0].get("last_flow_ticket")
+                return (
+                    float(ib) if ib is not None else None,
+                    int(tk) if tk is not None else None,
+                )
         except Exception:  # noqa: BLE001
             pass
-        return None
+        return None, None
 
     def report_state(self, *, symbol, balance, equity, margin_used, margin_free,
-                      floating_pnl, open_positions, initial_balance):
+                      floating_pnl, open_positions, initial_balance,
+                      last_flow_ticket=None):
         """Upsert del snapshot en vivo (bot_state) para el dashboard. Best-effort."""
         if self.client is None:
             return
@@ -263,6 +270,7 @@ class Database:
             "floating_pnl": float(floating_pnl),
             "open_positions": int(open_positions),
             "initial_balance": float(initial_balance),
+            "last_flow_ticket": int(last_flow_ticket or 0),
             "updated_at": _utcnow_iso(),
         }
         try:
