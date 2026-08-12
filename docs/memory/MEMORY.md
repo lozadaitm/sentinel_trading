@@ -13,3 +13,4 @@
 - [NewsGuard Fase 1](newsguard-phase1.md) — bloqueo duro por rojas USD vía exportador MQL5→JSON; observación por default (`news_enforce=false`), M5 cierra pre-roja, L3 exento
 - [NewsGuard Fase 2 (NRI)](newsguard-phase2-nri.md) — diseño completo del índice 0-1 (bandas, override, curvas) PENDIENTE; solo se construye si los logs de la Fase 1 lo justifican
 - [Objetivo de ganancia + cierre forzado](profit-target-and-force-close.md) — account_settings (% objetivo por cuenta, equity vs base, claim atómico → email + close-only) y bot_instances.force_close (cierre manual asumiendo flotante); migración 004 pendiente de aplicar
+- [Retiros + comisión USDT](withdrawals-commission-usdt.md) — retiro declarado → comisión (% en billing_settings, solo operador) → pago USDT BEP20 verificado on-chain (tx hash, RPC BSC) → desbloqueo; deuda PENDING bloquea reactivación (dashboard + guard del bot); migración 007

@@ -269,6 +269,37 @@ CREATE TABLE IF NOT EXISTS public.bot_candles (
 );
 
 -- ==================================================================
+-- billing_settings  |  % de comision por usuario (lo fija el operador).
+-- withdrawals       |  Retiros declarados + estado de su comision USDT.
+--   El usuario declara el retiro en el dashboard; la comision se paga en
+--   USDT (BEP20) y se verifica ON-CHAIN (server action con RPC de BSC).
+--   Con una comision PENDING la reactivacion queda bloqueada (dashboard +
+--   guard del bot). RLS solo SELECT: escribe unicamente el service-role.
+--   Ver migrations/007_withdrawals.sql.
+-- ==================================================================
+CREATE TABLE IF NOT EXISTS public.billing_settings (
+    user_id        UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    commission_pct DOUBLE PRECISION NOT NULL DEFAULT 10.0,
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.withdrawals (
+    id             BIGSERIAL PRIMARY KEY,
+    user_id        UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    amount         DOUBLE PRECISION NOT NULL,
+    commission_pct DOUBLE PRECISION NOT NULL,
+    commission_usd DOUBLE PRECISION NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'PENDING',  -- PENDING | PAID
+    tx_hash        TEXT UNIQUE,
+    paid_amount    DOUBLE PRECISION,
+    paid_at        TIMESTAMPTZ,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_withdrawals_user_created
+    ON public.withdrawals (user_id, created_at DESC);
+
+-- ==================================================================
 -- Row Level Security. El service-role bypassa TODO esto automaticamente;
 -- estas politicas aplican al frontend (rol authenticated con su JWT).
 -- ==================================================================
@@ -322,6 +353,21 @@ CREATE POLICY bot_positions_owner_select ON public.bot_positions
 ALTER TABLE public.bot_candles ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS bot_candles_owner_select ON public.bot_candles;
 CREATE POLICY bot_candles_owner_select ON public.bot_candles
+    FOR SELECT TO authenticated
+    USING (user_id = auth.uid());
+
+-- billing_settings / withdrawals: solo LECTURA para el dueño; el usuario no
+-- puede editar su % de comision ni marcarse un pago (escribe el service-role
+-- tras verificar el pago on-chain).
+ALTER TABLE public.billing_settings ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS billing_settings_owner_select ON public.billing_settings;
+CREATE POLICY billing_settings_owner_select ON public.billing_settings
+    FOR SELECT TO authenticated
+    USING (user_id = auth.uid());
+
+ALTER TABLE public.withdrawals ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS withdrawals_owner_select ON public.withdrawals;
+CREATE POLICY withdrawals_owner_select ON public.withdrawals
     FOR SELECT TO authenticated
     USING (user_id = auth.uid());
 

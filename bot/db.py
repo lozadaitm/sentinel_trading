@@ -193,6 +193,28 @@ class Database:
         except Exception:  # noqa: BLE001
             pass
 
+    def has_pending_commission(self):
+        """True si el usuario debe una comision de retiro (withdrawals PENDING).
+
+        Con deuda pendiente la instancia no puede operar: el guard del loop
+        revierte is_active=true a close-only. Ante fallo de red devuelve False
+        (un hipo de Supabase no debe frenar el trading).
+        """
+        if self.client is None:
+            return False
+        try:
+            res = (
+                self.client.table("withdrawals")
+                .select("id")
+                .eq("user_id", config.USER_ID)
+                .eq("status", "PENDING")
+                .limit(1)
+                .execute()
+            )
+            return bool(res.data)
+        except Exception:  # noqa: BLE001
+            return False
+
     def get_user_email(self):
         """Email del usuario (auth.users) via Admin API (service-role). None si falla.
 

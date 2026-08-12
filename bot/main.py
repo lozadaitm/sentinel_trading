@@ -387,6 +387,21 @@ def trading_loop(db, engine, logger, stop_event=None):
 
                 # Snapshot en vivo para el dashboard (bot_state). Best-effort;
                 # nunca debe tumbar el bucle si Supabase/MT5 fallan.
+                # Gate de comision: con una comision de retiro PENDIENTE la
+                # instancia no opera. Si el usuario (o cualquiera) pone
+                # is_active=true en la DB con deuda viva, el bot lo revierte a
+                # close-only. El desbloqueo llega solo cuando el pago USDT se
+                # verifica on-chain (status=PAID) desde el dashboard.
+                try:
+                    if engine.is_active and db.has_pending_commission():
+                        db.deactivate_all_instances()
+                        engine.is_active = False
+                        engine.close_only = True
+                        logger.write("SYSTEM", "Comision de retiro PENDIENTE: instancia en "
+                                               "solo-cierre hasta verificar el pago en el dashboard.")
+                except Exception:  # noqa: BLE001
+                    pass
+
                 try:
                     _reconcile_capital_flows(engine, logger)
                 except Exception:  # noqa: BLE001

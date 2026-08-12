@@ -113,6 +113,14 @@ Cuatro tablas en el schema `public`. Todas con FK a `auth.users(id)` y RLS por u
   posiciones y % win/loss — ver mapeo de métricas actualizado abajo. `bot_logs` sigue siendo el
   feed de eventos (útil para ver HEALER/UNWIND/VCB/SYSTEM/ERROR con contexto), no lo elimines.
 
+**`billing_settings` / `withdrawals`** — retiros declarados y comisión USDT BEP20 (migración 007):
+- `billing_settings.commission_pct` por usuario (default 10, lo fija el operador; usuario solo
+  lee). `withdrawals`: retiro declarado, comisión calculada, `status` PENDING|PAID, `tx_hash`
+  UNIQUE del pago verificado on-chain (RPC de BSC, server action del webapp). RLS solo SELECT.
+- Con una comisión PENDING la reactivación queda bloqueada: el dashboard bloquea el toggle y el
+  BOT revierte `is_active=true` a close-only (`bot/db.py::has_pending_commission` + guard en el
+  heartbeat de `bot/main.py`).
+
 **`bot_candles`** — velas OHLC para la gráfica del dashboard (migración 006):
 - `user_id`, `symbol`, `timeframe` (hoy solo `M15`), `ts` (apertura de la vela), `open/high/low/close`
   DOUBLE, `updated_at`. PK `(user_id, symbol, timeframe, ts)`. RLS `FOR SELECT` al dueño.
