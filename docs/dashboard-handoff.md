@@ -50,8 +50,21 @@ Cuatro tablas en el schema `public`. Todas con FK a `auth.users(id)` y RLS por u
   `false`=close-only (no abre, sigue gestionando/cerrando; NO es pausa dura).
 - `bot_status` TEXT — lo escribe el bot: `RUNNING | CLOSE_ONLY | FLAT | ERROR | STOPPED`.
 - `last_heartbeat` TIMESTAMPTZ — lo escribe el bot cada ~15 s. **Online/offline** = `now - last_heartbeat < ~45 s`.
+- `force_close` BOOLEAN — **cierre forzado** (migración 004): lo setea el USUARIO (el dashboard hace
+  `UPDATE { is_active: false, force_close: true }` sin filtro de `bot_id` → ambos motores); el bot
+  lo ejecuta en su refresh de control (~3 s), cierra todas sus posiciones asumiendo el flotante y lo
+  resetea a `false`. NO es un stop automático: siempre lo dispara el usuario.
 - `created_at`, `updated_at`.
-- RLS: `FOR ALL` al dueño → el dashboard del usuario puede leer y **actualizar `is_active`**.
+- RLS: `FOR ALL` al dueño → el dashboard del usuario puede leer y **actualizar `is_active`/`force_close`**.
+
+**`account_settings`** — preferencias a nivel CUENTA, 1 fila por usuario, SIN `bot_id` (migración 004):
+- `user_id` UUID (PK), `initial_deposit` DOUBLE (fondeo declarado; NULL = usar
+  `bot_state.initial_balance` auto-capturado de MT5), `profit_target_pct` DOUBLE (% objetivo sobre
+  la base, medido en EQUITY; NULL = desactivado), `target_reached_at` TIMESTAMPTZ, `updated_at`.
+- `target_reached_at` lo estampa el BOT al alcanzar el objetivo (claim atómico entre m15/m5 → un
+  solo email; ver `bot/main.py::_check_profit_target` y `bot/notify.py`); en ese momento apaga
+  ambos motores (`is_active=false` = close-only). El dashboard lo LIMPIA al guardar un objetivo
+  nuevo (re-armar). RLS: `FOR ALL` al dueño.
 
 **`bot_config`** — ~60 parámetros de estrategia por `(user_id, symbol)`, `UNIQUE(user_id, symbol)`:
 - Control: `id`, `user_id`, `symbol`, `is_active` (incluye/excluye símbolo), `status`, `updated_at`.

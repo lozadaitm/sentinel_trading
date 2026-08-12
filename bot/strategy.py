@@ -240,6 +240,12 @@ class SentinelEngine:
             lots = cap
         return lots
 
+    def close_all(self, reason):
+        """Cierre inmediato de toda la cesta por comando externo (force_close
+        del dashboard). El usuario asume el flotante actual; NO es un stop
+        automatico (esos siguen vetados por diseño)."""
+        self._close_all(reason)
+
     def _close_all(self, reason):
         total_profit = 0.0
         for p in self.b.positions():

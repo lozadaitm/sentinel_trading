@@ -27,9 +27,31 @@ CREATE TABLE IF NOT EXISTS public.bot_instances (
     is_active      BOOLEAN     NOT NULL DEFAULT false,      -- señal ON/OFF del usuario
     bot_status     TEXT        NOT NULL DEFAULT 'STOPPED',  -- lo reporta el bot
     last_heartbeat TIMESTAMPTZ,                             -- lo reporta el bot
+    -- Cierre forzado: lo setea el USUARIO (dashboard, junto con is_active=false);
+    -- el BOT lo lee en el refresh de control, cierra todas sus posiciones
+    -- (asumiendo el flotante) y lo resetea a false. Ver migrations/004.
+    force_close    BOOLEAN     NOT NULL DEFAULT false,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (user_id, bot_id)
+);
+
+-- ==================================================================
+-- account_settings  |  Preferencias a nivel CUENTA (1 fila por usuario).
+--   profit_target_pct -> % de ganancia objetivo sobre la base; al alcanzarlo
+--     (equity vs base) el bot apaga todas las instancias del usuario
+--     (close-only), envia email y estampa target_reached_at (claim atomico,
+--     dedup entre m15/m5). El usuario re-arma limpiando target_reached_at
+--     al guardar un objetivo nuevo. Ver migrations/004_profit_target.sql.
+--   initial_deposit -> monto de fondeo declarado; NULL = usar el
+--     bot_state.initial_balance auto-capturado de MT5 al primer arranque.
+-- ==================================================================
+CREATE TABLE IF NOT EXISTS public.account_settings (
+    user_id           UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    initial_deposit   DOUBLE PRECISION,
+    profit_target_pct DOUBLE PRECISION,
+    target_reached_at TIMESTAMPTZ,
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- ==================================================================
@@ -230,6 +252,14 @@ ALTER TABLE public.bot_logs      ENABLE ROW LEVEL SECURITY;
 -- bot_instances: el usuario gestiona (lee/edita) SOLO su propia fila.
 DROP POLICY IF EXISTS bot_instances_owner ON public.bot_instances;
 CREATE POLICY bot_instances_owner ON public.bot_instances
+    FOR ALL TO authenticated
+    USING (user_id = auth.uid())
+    WITH CHECK (user_id = auth.uid());
+
+-- account_settings: el usuario gestiona (lee/edita) SOLO su propia fila.
+ALTER TABLE public.account_settings ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS account_settings_owner ON public.account_settings;
+CREATE POLICY account_settings_owner ON public.account_settings
     FOR ALL TO authenticated
     USING (user_id = auth.uid())
     WITH CHECK (user_id = auth.uid());

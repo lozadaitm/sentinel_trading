@@ -18,7 +18,7 @@ import time
 
 import MetaTrader5 as mt5
 
-from . import config
+from . import config, notify
 from .broker import Broker
 from .db import Database
 from .logger import Logger
@@ -208,6 +208,46 @@ def _closed_position_row(broker, ticket):
     return row
 
 
+def _check_profit_target(db, engine, logger, info):
+    """Objetivo de ganancia de la CUENTA (account_settings.profit_target_pct).
+
+    La ganancia se mide en EQUITY (incluye flotante) contra la base: el
+    initial_deposit declarado por el usuario o, en su defecto, el
+    initial_balance auto-capturado de MT5 al primer arranque. Al alcanzarla:
+      1. claim atomico de target_reached_at (solo un motor gana -> un email).
+      2. is_active=false para TODAS las instancias del usuario (close-only:
+         se deja de abrir y se gestiona lo abierto hasta quedar plano; el
+         usuario decide en el dashboard si espera o fuerza el cierre).
+      3. Email de notificacion (best-effort, hilo aparte).
+    """
+    acct = db.get_account_settings()
+    target = acct.get("profit_target_pct")
+    if not target or acct.get("target_reached_at"):
+        return
+    base = acct.get("initial_deposit") or engine.initial_balance
+    if not base or base <= 0:
+        return
+    profit_pct = (info.equity - base) / base * 100.0
+    if profit_pct < float(target):
+        return
+    if not db.claim_profit_target():
+        return  # el otro motor ya reclamo el evento (o hipo de red): no duplicar
+    db.deactivate_all_instances()
+    engine.is_active = False
+    engine.close_only = True
+    logger.write("TARGET",
+                 f"OBJETIVO DE GANANCIA alcanzado: +{profit_pct:.2f}% >= {float(target):g}%. "
+                 f"Equity {info.equity:.2f} / base {base:.2f}. Bots del usuario en close-only.",
+                 balance=info.balance)
+    notify.send_async(
+        engine.user_email,
+        "Sentinel: objetivo de ganancia alcanzado",
+        notify.profit_target_body(profit_pct=profit_pct, target_pct=float(target),
+                                  equity=info.equity, base=base, symbol=config.SYMBOL),
+        logger,
+    )
+
+
 def trading_loop(db, engine, logger, stop_event=None):
     """Bucle principal. Corre hasta stop_event (TUI) o KeyboardInterrupt (consola).
 
@@ -237,6 +277,19 @@ def trading_loop(db, engine, logger, stop_event=None):
                 engine.close_only = not engine.is_active
                 engine.cfg = cfg
                 last_refresh = now
+
+                # Cierre forzado pedido desde el dashboard: el usuario asume el
+                # flotante actual. Se cierra todo lo propio y se consume el
+                # comando (force_close=false + is_active=false en la DB). Si el
+                # reset falla por red, el proximo refresh reintenta: close_all
+                # sobre cero posiciones es inocuo.
+                if inst.get("force_close"):
+                    logger.write("SYSTEM", "CIERRE FORZADO solicitado por el usuario: "
+                                           "cerrando todas las posiciones de esta instancia.")
+                    engine.close_all("Cierre forzado por el usuario")
+                    engine.is_active = False
+                    engine.close_only = True
+                    db.clear_force_close()
 
             if not cfg:
                 # Sin config activa ni cache: nada que gestionar aun.
@@ -268,6 +321,7 @@ def trading_loop(db, engine, logger, stop_event=None):
                             open_positions=len(engine.b.positions()),
                             initial_balance=engine.initial_balance,
                         )
+                        _check_profit_target(db, engine, logger, info)
                 except Exception:  # noqa: BLE001
                     pass
 

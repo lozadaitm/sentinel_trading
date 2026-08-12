@@ -133,6 +133,16 @@ MT5_SERVER = os.environ.get("MT5_SERVER", "")   # servidor del broker
 MT5_PASSWORD = os.environ.get("MT5_PASSWORD", "")
 
 # ==================================================================
+# SMTP (bot/notify.py) - notificaciones por correo al usuario.
+# Sin SMTP_HOST el modulo queda inerte (el evento igual queda en DB).
+# ==================================================================
+SMTP_HOST = os.environ.get("SMTP_HOST", "")
+SMTP_PORT = os.environ.get("SMTP_PORT", "587")   # 587 STARTTLS | 465 SSL
+SMTP_USER = os.environ.get("SMTP_USER", "")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+SMTP_FROM = os.environ.get("SMTP_FROM", "")      # default: SMTP_USER
+
+# ==================================================================
 # NEWSGUARD (bot/news.py)  - snapshot del calendario economico
 # Lo escribe scripts/CalendarExporter.mq5 en la carpeta COMUN de
 # MetaQuotes: una sola ruta que sirve a todas las instancias de esta PC.

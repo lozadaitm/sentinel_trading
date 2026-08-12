@@ -109,6 +109,90 @@ class Database:
         except Exception:  # noqa: BLE001
             return self._inst_cache or {}
 
+    def clear_force_close(self):
+        """Consuma el comando de cierre forzado de ESTA instancia.
+
+        Ademas de resetear el flag deja is_active=false: tras un cierre forzado
+        el bot no debe reabrir aunque el usuario no haya alcanzado a togglear.
+        Best-effort, pero devuelve False si no se pudo escribir (el caller
+        decide si reintenta en el proximo refresh).
+        """
+        if self.client is None:
+            return False
+        try:
+            self.client.table("bot_instances").update(
+                {"force_close": False, "is_active": False, "updated_at": _utcnow_iso()}
+            ).eq("user_id", config.USER_ID).eq("bot_id", config.BOT_ID).execute()
+            # Mantener la cache coherente para no re-disparar con una fila vieja.
+            if self._inst_cache is not None:
+                self._inst_cache["force_close"] = False
+                self._inst_cache["is_active"] = False
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    # ==============================================================
+    # Preferencias a nivel cuenta (account_settings)
+    # ==============================================================
+    def get_account_settings(self):
+        """Fila de account_settings del usuario (dict) o {} si no existe/falla.
+
+        Es a nivel CUENTA (sin bot_id): el objetivo de ganancia se mide contra
+        el equity, que ambos motores comparten.
+        """
+        if self.client is None:
+            return {}
+        try:
+            res = (
+                self.client.table("account_settings")
+                .select("*")
+                .eq("user_id", config.USER_ID)
+                .limit(1)
+                .execute()
+            )
+            rows = res.data or []
+            return dict(rows[0]) if rows else {}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def claim_profit_target(self):
+        """Reclama el evento 'objetivo alcanzado' de forma atomica.
+
+        UPDATE ... WHERE target_reached_at IS NULL: solo un motor (m15 o m5)
+        gana la fila, asi el email sale UNA vez aunque ambos detecten el
+        cruce en el mismo heartbeat. Devuelve True si este proceso gano.
+        """
+        if self.client is None:
+            return False
+        try:
+            res = (
+                self.client.table("account_settings")
+                .update({"target_reached_at": _utcnow_iso(), "updated_at": _utcnow_iso()})
+                .eq("user_id", config.USER_ID)
+                .is_("target_reached_at", "null")
+                .execute()
+            )
+            return bool(res.data)
+        except Exception:  # noqa: BLE001
+            return False
+
+    def deactivate_all_instances(self):
+        """Apaga TODAS las instancias del usuario (is_active=false = close-only).
+
+        Se usa al alcanzar el objetivo de ganancia: el evento es de cuenta,
+        no de motor, asi que apaga m15 y m5 a la vez. Best-effort.
+        """
+        if self.client is None:
+            return
+        try:
+            self.client.table("bot_instances").update(
+                {"is_active": False, "updated_at": _utcnow_iso()}
+            ).eq("user_id", config.USER_ID).execute()
+            if self._inst_cache is not None:
+                self._inst_cache["is_active"] = False
+        except Exception:  # noqa: BLE001
+            pass
+
     def get_user_email(self):
         """Email del usuario (auth.users) via Admin API (service-role). None si falla.
 
