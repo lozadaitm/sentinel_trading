@@ -44,6 +44,9 @@ def _send(to_addr, subject, body, logger=None):
         headers={
             "Authorization": f"Bearer {config.RESEND_API_KEY}",
             "Content-Type": "application/json",
+            # Cloudflare (delante de api.resend.com) devuelve 403 error 1010
+            # al User-Agent por defecto de urllib ("Python-urllib/3.x").
+            "User-Agent": "sentinel-bot/1.0 (+notify)",
         },
     )
     try:
