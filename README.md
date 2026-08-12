@@ -99,9 +99,23 @@ Unregister-ScheduledTask -TaskName "SentinelProvisioner"   # eliminarla
 Get-Content logs\provision.log -Tail 20                    # ver el log del provisioner
 ```
 
-> La tarea NO lanza los motores: provisiona la instancia y el arranque sigue siendo
-> `scripts\start_all.ps1` (preflight + tests + auditorías). La instancia nace con
-> `is_active=false`, así que nada opera hasta encender el toggle en el dashboard.
+**Reinicio automático al provisionar**: cuando el provisioner crea al menos una
+instancia nueva, dispara la tarea **`SentinelRestart`** (corre interactiva en la sesión
+del operador), que ejecuta [`scripts/restart_all.ps1`](scripts/restart_all.ps1): mata
+los bots y terminales MT5 abiertos y relanza `start_all.ps1 -SkipAudits` con TODAS las
+instancias, incluidas las nuevas. Log en `logs\restart_all.log`.
+
+```powershell
+Start-ScheduledTask -TaskName "SentinelRestart"            # reinicio completo a mano
+scripts\restart_all.ps1 -DryRun                            # ver qué mataría, sin tocar nada
+scripts\restart_all.ps1 -KeepTerminals                     # reiniciar bots sin cerrar los MT5
+Get-Content logs\restart_all.log -Tail 30                  # ver el log del reinicio
+```
+
+> Requiere la sesión del operador abierta (o desconectada, no cerrada): las TUIs y los
+> terminales necesitan ventana. Para desactivar el reinicio automático:
+> `PROVISION_RESTART_TASK=` (vacío) en el entorno de la tarea del provisioner. Las
+> instancias nacen con `is_active=false`, así que nada opera hasta encender el toggle.
 
 ### B. Alta manual (fallback)
 

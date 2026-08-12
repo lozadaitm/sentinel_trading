@@ -27,9 +27,15 @@ usuarios ya no es manual.
    soporte añadido en `bot/config.py`/`bot/main.py`) y marca READY **borrando
    `mt5_password` de la DB** (la credencial queda solo en el .env del VPS). Si el .env
    ya existe escribe `<user_id>.env.new` para no pisar ajustes manuales.
-5. El arranque sigue siendo `scripts\start_all.ps1` (preflight+tests+auditorías); las
-   instancias nacen con `is_active=false` (no operan hasta que el usuario/operador
-   enciende el toggle).
+5. **Reinicio automático**: si el provisioner creó ≥1 instancia, dispara la tarea
+   `SentinelRestart` (interactiva, sesión del operador — el provisioner corre como
+   SYSTEM en sesión 0 y no puede abrir ventanas), que ejecuta
+   `scripts/restart_all.ps1`: mata bots (python `bot.*` + hosts `run_instance.ps1`) y
+   `terminal64.exe`, y relanza `start_all.ps1 -SkipAudits` con todas las instancias.
+   Log: `logs\restart_all.log`. Desactivable con `PROVISION_RESTART_TASK=` vacío. Las
+   instancias nacen con `is_active=false` (no operan hasta encender el toggle).
+   OJO: el reinicio tumba también los bots activos ~1-2 min; el estado sobrevive
+   (ledger, initial_balance, is_active en DB).
 
 **Seguridad:** `invites` y `provision_requests` tienen RLS habilitada SIN políticas —
 solo service-role las toca (ni el propio usuario puede leerlas). El claim del invite es

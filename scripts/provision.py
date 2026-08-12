@@ -42,6 +42,12 @@ INSTANCES_DIR = os.path.join(ROOT, "instances")
 MT5_BASE_DIR = os.environ.get("MT5_BASE_DIR", r"C:\Program Files\MetaTrader 5")
 MT5_CLONES_DIR = os.environ.get("MT5_CLONES_DIR", r"C:\MT5_instances")
 
+# Tarea programada que tumba bots+terminales y relanza start_all tras
+# provisionar algo nuevo. Corre INTERACTIVA en la sesion del operador (las
+# TUIs y terminales necesitan ventana; este script corre como SYSTEM).
+# Vacia ("PROVISION_RESTART_TASK=") = no reiniciar nada automaticamente.
+RESTART_TASK = os.environ.get("PROVISION_RESTART_TASK", "SentinelRestart")
+
 ENV_TEMPLATE = """# Usuario: {label} / {email}
 # Generado por scripts/provision.py el {stamp} (request #{req_id}).
 # Una instancia = un usuario = una cuenta = un terminal MT5 (clon portable).
@@ -146,6 +152,23 @@ def _write_instance_env(req, mt5_path, supabase_url, supabase_key):
     return path
 
 
+def _trigger_restart():
+    """Dispara el reinicio completo (scripts/restart_all.ps1) via la tarea
+    programada SentinelRestart: mata bots y terminales y relanza start_all
+    en la sesion del operador, ya con la(s) instancia(s) nueva(s) incluidas.
+    """
+    if not RESTART_TASK:
+        print("PROVISION_RESTART_TASK vacio: sin reinicio automatico.")
+        return
+    try:
+        subprocess.run(["schtasks", "/Run", "/TN", RESTART_TASK],
+                       check=True, capture_output=True, text=True)
+        print(f"Reinicio completo disparado (tarea '{RESTART_TASK}').")
+    except Exception as e:  # noqa: BLE001
+        print(f"No se pudo disparar el reinicio ('{RESTART_TASK}'): {e}. "
+              f"Lanza scripts\\restart_all.ps1 (o start_all.ps1) a mano.")
+
+
 def _start_instance(env_path, bots):
     """Lanza los motores de la instancia en ventanas nuevas (modo consola)."""
     runner = os.path.join(ROOT, "scripts", "run_instance.ps1")
@@ -221,14 +244,18 @@ def main():
         print("Vigilando provision_requests (Ctrl+C para salir)...")
         while True:
             try:
-                process_pending(client, start=args.start)
+                done = process_pending(client, start=args.start)
+                if done and not args.start:
+                    _trigger_restart()
             except KeyboardInterrupt:
                 raise
             except Exception as e:  # noqa: BLE001
                 print(f"Error consultando la cola: {e}")
             time.sleep(60)
     else:
-        process_pending(client, start=args.start)
+        done = process_pending(client, start=args.start)
+        if done and not args.start:
+            _trigger_restart()
 
 
 if __name__ == "__main__":
