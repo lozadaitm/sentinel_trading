@@ -133,14 +133,13 @@ MT5_SERVER = os.environ.get("MT5_SERVER", "")   # servidor del broker
 MT5_PASSWORD = os.environ.get("MT5_PASSWORD", "")
 
 # ==================================================================
-# SMTP (bot/notify.py) - notificaciones por correo al usuario.
-# Sin SMTP_HOST el modulo queda inerte (el evento igual queda en DB).
+# RESEND (bot/notify.py) - notificaciones por correo al usuario.
+# Sin RESEND_API_KEY el modulo queda inerte (el evento igual queda en DB).
+# El from por defecto (onboarding@resend.dev) solo entrega al dueño de la
+# cuenta Resend; para usuarios reales, verificar dominio y setear RESEND_FROM.
 # ==================================================================
-SMTP_HOST = os.environ.get("SMTP_HOST", "")
-SMTP_PORT = os.environ.get("SMTP_PORT", "587")   # 587 STARTTLS | 465 SSL
-SMTP_USER = os.environ.get("SMTP_USER", "")
-SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
-SMTP_FROM = os.environ.get("SMTP_FROM", "")      # default: SMTP_USER
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+RESEND_FROM = os.environ.get("RESEND_FROM", "Sentinel <onboarding@resend.dev>")
 
 # ==================================================================
 # NEWSGUARD (bot/news.py)  - snapshot del calendario economico

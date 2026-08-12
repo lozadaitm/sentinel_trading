@@ -22,8 +22,11 @@ en Supabase): el usuario configura en el dashboard un **% de ganancia objetivo**
   2. `db.deactivate_all_instances()`: `is_active=false` para TODAS las instancias del
      usuario = close-only (semántica de [[supabase-multi-instance-model]]; NO cierra nada
      a la fuerza).
-  3. Email vía `bot/notify.py` (SMTP por env `SMTP_*`, ver instances/example.env;
-     destinatario = email de auth.users; sin SMTP_HOST queda inerte y solo loguea).
+  3. Email vía `bot/notify.py` (**Resend**, API HTTP con urllib; env `RESEND_API_KEY` /
+     `RESEND_FROM`, ver instances/example.env; destinatario = email de auth.users; sin
+     API key queda inerte y solo loguea). El from default `onboarding@resend.dev` solo
+     entrega al dueño de la cuenta Resend: para usuarios reales hay que verificar un
+     dominio en resend.com y setear `RESEND_FROM`.
   4. Log `log_type=TARGET` (nuevo en la taxonomía de [[logging-taxonomy-and-ticket]]).
 - El dashboard **re-arma** limpiando `target_reached_at` al guardar un objetivo nuevo
   (upsert desde `profit-target-panel.tsx` en el repo webapp).

@@ -1,49 +1,63 @@
-"""Notificaciones por correo (SMTP). Best-effort: nunca tumba el motor.
+"""Notificaciones por correo via Resend (API HTTP). Best-effort: nunca tumba el motor.
 
 Config por entorno/.env (ver instances/example.env):
-    SMTP_HOST, SMTP_PORT (587 STARTTLS | 465 SSL), SMTP_USER, SMTP_PASSWORD,
-    SMTP_FROM (default: SMTP_USER).
+    RESEND_API_KEY  -> key del proyecto en resend.com (obligatoria para enviar).
+    RESEND_FROM     -> remitente. Default: "Sentinel <onboarding@resend.dev>",
+                       que Resend solo entrega al email dueño de la cuenta;
+                       para enviar a cualquier usuario hay que verificar un
+                       dominio en Resend y usar un from de ese dominio.
 
-Sin SMTP_HOST configurado el modulo queda inerte (solo loguea): el evento de
-objetivo alcanzado sigue quedando en bot_logs y en account_settings aunque el
-correo no salga.
+Sin RESEND_API_KEY el modulo queda inerte (solo loguea): el evento de objetivo
+alcanzado sigue quedando en bot_logs y en account_settings aunque el correo no
+salga.
 
-El envio se hace en un hilo daemon: un SMTP lento (segundos) no debe congelar
-el bucle de trading, que corre a 1 s por tick.
+El envio se hace en un hilo daemon: una llamada HTTP lenta (segundos) no debe
+congelar el bucle de trading, que corre a 1 s por tick. Se usa urllib (stdlib)
+para no añadir dependencias.
 """
 
-import smtplib
+import json
 import threading
-from email.message import EmailMessage
-from email.utils import formatdate
+import urllib.error
+import urllib.request
 
 from . import config
 
+API_URL = "https://api.resend.com/emails"
+
 
 def is_configured():
-    return bool(config.SMTP_HOST and config.SMTP_USER and config.SMTP_PASSWORD)
+    return bool(config.RESEND_API_KEY)
 
 
 def _send(to_addr, subject, body, logger=None):
-    msg = EmailMessage()
-    msg["From"] = config.SMTP_FROM or config.SMTP_USER
-    msg["To"] = to_addr
-    msg["Subject"] = subject
-    msg["Date"] = formatdate(localtime=True)
-    msg.set_content(body)
+    payload = json.dumps({
+        "from": config.RESEND_FROM,
+        "to": [to_addr],
+        "subject": subject,
+        "text": body,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        API_URL,
+        data=payload,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {config.RESEND_API_KEY}",
+            "Content-Type": "application/json",
+        },
+    )
     try:
-        port = int(config.SMTP_PORT)
-        if port == 465:
-            with smtplib.SMTP_SSL(config.SMTP_HOST, port, timeout=20) as s:
-                s.login(config.SMTP_USER, config.SMTP_PASSWORD)
-                s.send_message(msg)
-        else:
-            with smtplib.SMTP(config.SMTP_HOST, port, timeout=20) as s:
-                s.starttls()
-                s.login(config.SMTP_USER, config.SMTP_PASSWORD)
-                s.send_message(msg)
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            resp.read()
         if logger:
             logger.write("SYSTEM", f"Email enviado a {to_addr}: {subject}")
+    except urllib.error.HTTPError as e:  # respuesta de la API con detalle util
+        try:
+            detail = e.read().decode("utf-8", errors="replace")[:300]
+        except Exception:  # noqa: BLE001
+            detail = ""
+        if logger:
+            logger.write("ERROR", f"Resend rechazo el email a {to_addr} ({e.code}): {detail}")
     except Exception as e:  # noqa: BLE001  (best-effort; el evento ya quedo en DB)
         if logger:
             logger.write("ERROR", f"Fallo el envio de email a {to_addr}: {e}")
@@ -57,7 +71,7 @@ def send_async(to_addr, subject, body, logger=None):
         return
     if not is_configured():
         if logger:
-            logger.write("SYSTEM", f"SMTP sin configurar: se omite el email a {to_addr} ({subject}).")
+            logger.write("SYSTEM", f"RESEND_API_KEY sin configurar: se omite el email a {to_addr} ({subject}).")
         return
     threading.Thread(
         target=_send, args=(to_addr, subject, body, logger),
