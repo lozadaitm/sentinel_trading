@@ -58,9 +58,10 @@ Cuatro tablas en el schema `public`. Todas con FK a `auth.users(id)` y RLS por u
 - RLS: `FOR ALL` al dueño → el dashboard del usuario puede leer y **actualizar `is_active`/`force_close`**.
 
 **`account_settings`** — preferencias a nivel CUENTA, 1 fila por usuario, SIN `bot_id` (migración 004):
-- `user_id` UUID (PK), `initial_deposit` DOUBLE (fondeo declarado; NULL = usar
-  `bot_state.initial_balance` auto-capturado de MT5), `profit_target_pct` DOUBLE (% objetivo sobre
-  la base, medido en EQUITY; NULL = desactivado), `target_reached_at` TIMESTAMPTZ, `updated_at`.
+- `user_id` UUID (PK), `initial_deposit` DOUBLE (**sin uso, siempre NULL**: se decidió
+  auto-detectar la base con `bot_state.initial_balance`, capturado de MT5 en la primera corrida),
+  `profit_target_pct` DOUBLE (% objetivo sobre la base, medido en EQUITY; NULL = desactivado),
+  `target_reached_at` TIMESTAMPTZ, `updated_at`.
 - `target_reached_at` lo estampa el BOT al alcanzar el objetivo (claim atómico entre m15/m5 → un
   solo email; ver `bot/main.py::_check_profit_target` y `bot/notify.py`); en ese momento apaga
   ambos motores (`is_active=false` = close-only). El dashboard lo LIMPIA al guardar un objetivo

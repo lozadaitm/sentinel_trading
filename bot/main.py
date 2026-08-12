@@ -212,8 +212,9 @@ def _check_profit_target(db, engine, logger, info):
     """Objetivo de ganancia de la CUENTA (account_settings.profit_target_pct).
 
     La ganancia se mide en EQUITY (incluye flotante) contra la base: el
-    initial_deposit declarado por el usuario o, en su defecto, el
-    initial_balance auto-capturado de MT5 al primer arranque. Al alcanzarla:
+    initial_balance auto-capturado de MT5 en la primera corrida de la
+    instancia (bot_state; la columna account_settings.initial_deposit quedo
+    sin uso por decision de producto). Al alcanzarla:
       1. claim atomico de target_reached_at (solo un motor gana -> un email).
       2. is_active=false para TODAS las instancias del usuario (close-only:
          se deja de abrir y se gestiona lo abierto hasta quedar plano; el
@@ -224,7 +225,7 @@ def _check_profit_target(db, engine, logger, info):
     target = acct.get("profit_target_pct")
     if not target or acct.get("target_reached_at"):
         return
-    base = acct.get("initial_deposit") or engine.initial_balance
+    base = engine.initial_balance
     if not base or base <= 0:
         return
     profit_pct = (info.equity - base) / base * 100.0

@@ -11,9 +11,10 @@ en Supabase): el usuario configura en el dashboard un **% de ganancia objetivo**
 
 **Objetivo de ganancia (a nivel CUENTA, no por motor):**
 - Vive en la tabla nueva **`account_settings`** (1 fila por usuario, sin `bot_id`):
-  `profit_target_pct` (NULL = off), `initial_deposit` (fondeo declarado; NULL = usar
-  `bot_state.initial_balance` auto-capturado de MT5 al primer arranque, mecanismo que ya
-  existía), `target_reached_at`.
+  `profit_target_pct` (NULL = off) y `target_reached_at`. La columna `initial_deposit`
+  quedó **sin uso** (siempre NULL): el usuario decidió que la base sea siempre el
+  `bot_state.initial_balance` auto-capturado de MT5 en la primera corrida (mecanismo que
+  ya existía), sin pedir el fondeo en el dashboard.
 - La ganancia se mide en **EQUITY** (incluye flotante): `(equity - base) / base * 100`.
 - Chequeo en `bot/main.py::_check_profit_target` (cada heartbeat, ~15 s). Al alcanzarlo:
   1. **Claim atómico** de `target_reached_at` (`db.claim_profit_target`: UPDATE ... WHERE
