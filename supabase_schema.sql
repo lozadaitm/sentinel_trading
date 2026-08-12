@@ -51,6 +51,10 @@ CREATE TABLE IF NOT EXISTS public.account_settings (
     initial_deposit   DOUBLE PRECISION,
     profit_target_pct DOUBLE PRECISION,
     target_reached_at TIMESTAMPTZ,
+    -- Reinicio del P&L por ciclo de meta: lo estampa el dashboard al
+    -- reactivar/re-armar tras un objetivo alcanzado; cada bot lo aplica una
+    -- vez (base nueva = equity presente). Ver migrations/009.
+    baseline_reset_at TIMESTAMPTZ,
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -205,6 +209,9 @@ CREATE TABLE IF NOT EXISTS public.bot_state (
     -- Ancla de reconciliacion de flujos: ticket del ultimo deal de
     -- deposito/retiro ya incorporado a initial_balance.
     last_flow_ticket BIGINT,
+    -- Sello del ultimo baseline_reset_at (account_settings) ya aplicado por
+    -- este bot: idempotencia del reinicio del P&L. Ver migrations/009.
+    baseline_applied_at TIMESTAMPTZ,
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (user_id, bot_id)
 );

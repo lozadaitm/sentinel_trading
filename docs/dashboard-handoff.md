@@ -66,6 +66,10 @@ Cuatro tablas en el schema `public`. Todas con FK a `auth.users(id)` y RLS por u
   solo email; ver `bot/main.py::_check_profit_target` y `bot/notify.py`); en ese momento apaga
   ambos motores (`is_active=false` = close-only). El dashboard lo LIMPIA al guardar un objetivo
   nuevo (re-armar). RLS: `FOR ALL` al dueño.
+- `baseline_reset_at` (migración 009) — **P&L por ciclos**: el dashboard lo estampa al reactivar
+  un motor o re-armar la meta tras un objetivo alcanzado; cada bot lo aplica una vez
+  (`bot_state.baseline_applied_at`): base nueva = equity presente (post-retiro si lo hubo) y el
+  % de ganancia arranca de 0 hacia la próxima meta.
 
 **`bot_config`** — ~60 parámetros de estrategia por `(user_id, symbol)`, `UNIQUE(user_id, symbol)`:
 - Control: `id`, `user_id`, `symbol`, `is_active` (incluye/excluye símbolo), `status`, `updated_at`.

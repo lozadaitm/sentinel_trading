@@ -37,6 +37,14 @@ en Supabase): el usuario configura en el dashboard un **% de ganancia objetivo**
   4. Log `log_type=TARGET` (nuevo en la taxonomía de [[logging-taxonomy-and-ticket]]).
 - El dashboard **re-arma** limpiando `target_reached_at` al guardar un objetivo nuevo
   (upsert desde `profit-target-panel.tsx` en el repo webapp).
+- **El P&L funciona por CICLOS de meta** (migración `009_pnl_rebase.sql`): al reactivar
+  un motor (o re-armar la meta) tras un objetivo alcanzado, el dashboard estampa
+  `account_settings.baseline_reset_at`; cada bot lo aplica UNA vez en su heartbeat
+  (`_apply_baseline_reset`): base nueva = **equity presente** (post-retiro si lo hubo),
+  ancla de flujos adelantada, sello guardado en `bot_state.baseline_applied_at`
+  (idempotente entre motores/restarts). Sin esto, re-armar el mismo % re-dispararía la
+  meta al instante. Consecuencia: "Ganancias totales" del dashboard = ganancia del
+  ciclo actual, no histórica.
 
 **Cierre forzado (decisión del usuario tras alcanzar el objetivo, o en cualquier momento):**
 - Columna nueva `bot_instances.force_close`. El dashboard setea

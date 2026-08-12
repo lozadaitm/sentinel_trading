@@ -114,7 +114,8 @@ def setup(logger=None, engine_cls=None):
     # de flujos (last_flow_ticket) evita re-contar depositos/retiros ya
     # incorporados a la base; sin ancla previa se parte del ultimo deal de
     # flujo existente (el balance actual ya los refleja todos).
-    engine.initial_balance, engine.last_flow_ticket = db.get_state_flow_info()
+    (engine.initial_balance, engine.last_flow_ticket,
+     engine.baseline_applied_at) = db.get_state_flow_info()
     if engine.initial_balance is None:
         engine.initial_balance = broker.account_balance()
     if engine.last_flow_ticket is None:
@@ -279,7 +280,30 @@ def _reconcile_capital_flows(engine, logger):
                  balance=engine.b.account_balance())
 
 
-def _check_profit_target(db, engine, logger, info):
+def _apply_baseline_reset(engine, logger, acct, info):
+    """Reinicio del P&L por ciclo de meta (account_settings.baseline_reset_at).
+
+    Lo estampa el dashboard al reactivar/re-armar tras un objetivo alcanzado:
+    la ganancia del ciclo NUEVO se mide desde el monto presente de la cuenta
+    (post-retiro si lo hubo; equity para incluir el flotante). Se aplica UNA
+    vez por sello (bot_state.baseline_applied_at) y se adelanta el ancla de
+    flujos: los depositos/retiros previos ya estan reflejados en la base nueva.
+    """
+    reset_at = acct.get("baseline_reset_at")
+    if not reset_at or reset_at == engine.baseline_applied_at:
+        return
+    engine.initial_balance = float(info.equity)
+    engine.last_flow_ticket = max(
+        (d.ticket for d in engine.b.capital_flows(0)),
+        default=engine.last_flow_ticket or 0)
+    engine.baseline_applied_at = reset_at
+    logger.write("SYSTEM",
+                 f"BASE DEL P&L reiniciada a {info.equity:.2f} (ciclo nuevo tras "
+                 f"objetivo alcanzado / retiro).",
+                 balance=info.balance)
+
+
+def _check_profit_target(db, engine, logger, info, acct):
     """Objetivo de ganancia de la CUENTA (account_settings.profit_target_pct).
 
     La ganancia se mide en EQUITY (incluye flotante) contra la base: el
@@ -292,7 +316,6 @@ def _check_profit_target(db, engine, logger, info):
          usuario decide en el dashboard si espera o fuerza el cierre).
       3. Email de notificacion (best-effort, hilo aparte).
     """
-    acct = db.get_account_settings()
     target = acct.get("profit_target_pct")
     if not target or acct.get("target_reached_at"):
         return
@@ -411,6 +434,10 @@ def trading_loop(db, engine, logger, stop_event=None):
                 try:
                     info = mt5.account_info()
                     if info:
+                        # account_settings se lee UNA vez por heartbeat y
+                        # alimenta el reinicio de base y el chequeo de meta.
+                        acct = db.get_account_settings()
+                        _apply_baseline_reset(engine, logger, acct, info)
                         db.report_state(
                             symbol=config.SYMBOL,
                             balance=info.balance,
@@ -421,8 +448,9 @@ def trading_loop(db, engine, logger, stop_event=None):
                             open_positions=len(engine.b.positions()),
                             initial_balance=engine.initial_balance,
                             last_flow_ticket=engine.last_flow_ticket,
+                            baseline_applied_at=engine.baseline_applied_at,
                         )
-                        _check_profit_target(db, engine, logger, info)
+                        _check_profit_target(db, engine, logger, info, acct)
                 except Exception:  # noqa: BLE001
                     pass
 

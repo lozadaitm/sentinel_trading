@@ -246,18 +246,19 @@ class Database:
     # Snapshot en vivo para el dashboard (bot_state)
     # ==============================================================
     def get_state_flow_info(self):
-        """(initial_balance, last_flow_ticket) ya persistidos en bot_state.
+        """(initial_balance, last_flow_ticket, baseline_applied_at) de bot_state.
 
-        (None, None) si no hay fila aun. Se lee una vez al arrancar para no
-        resetear la base ni re-contar flujos en cada restart del proceso
-        (ver bot/main.py::setup y _reconcile_capital_flows).
+        (None, None, None) si no hay fila aun. Se lee una vez al arrancar para
+        no resetear la base, re-contar flujos ni re-aplicar un reinicio de P&L
+        en cada restart del proceso (ver bot/main.py::setup,
+        _reconcile_capital_flows y _apply_baseline_reset).
         """
         if self.client is None:
-            return None, None
+            return None, None, None
         try:
             res = (
                 self.client.table("bot_state")
-                .select("initial_balance,last_flow_ticket")
+                .select("initial_balance,last_flow_ticket,baseline_applied_at")
                 .eq("user_id", config.USER_ID)
                 .eq("bot_id", config.BOT_ID)
                 .limit(1)
@@ -270,14 +271,15 @@ class Database:
                 return (
                     float(ib) if ib is not None else None,
                     int(tk) if tk is not None else None,
+                    rows[0].get("baseline_applied_at"),
                 )
         except Exception:  # noqa: BLE001
             pass
-        return None, None
+        return None, None, None
 
     def report_state(self, *, symbol, balance, equity, margin_used, margin_free,
                       floating_pnl, open_positions, initial_balance,
-                      last_flow_ticket=None):
+                      last_flow_ticket=None, baseline_applied_at=None):
         """Upsert del snapshot en vivo (bot_state) para el dashboard. Best-effort."""
         if self.client is None:
             return
@@ -293,6 +295,7 @@ class Database:
             "open_positions": int(open_positions),
             "initial_balance": float(initial_balance),
             "last_flow_ticket": int(last_flow_ticket or 0),
+            "baseline_applied_at": baseline_applied_at,
             "updated_at": _utcnow_iso(),
         }
         try:
