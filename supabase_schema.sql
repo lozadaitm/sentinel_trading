@@ -248,6 +248,27 @@ CREATE INDEX IF NOT EXISTS idx_bot_positions_user_open_time
     ON public.bot_positions (user_id, open_time DESC);
 
 -- ==================================================================
+-- bot_candles  |  Velas OHLC para la grafica del dashboard.
+--   Las publica SOLO el proceso m15 (una fuente por cuenta): backfill de
+--   ~400 velas M15 al arrancar (+ poda >30 dias) y upsert de las 2 ultimas
+--   en cada heartbeat. `ts` = apertura de la vela en hora del servidor MT5
+--   tratada como UTC (mismo criterio que bot_positions.open_time: velas y
+--   marcadores quedan alineados). Ver migrations/006_candles.sql.
+-- ==================================================================
+CREATE TABLE IF NOT EXISTS public.bot_candles (
+    user_id    UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    symbol     TEXT NOT NULL,
+    timeframe  TEXT NOT NULL DEFAULT 'M15',
+    ts         TIMESTAMPTZ NOT NULL,
+    open       DOUBLE PRECISION NOT NULL,
+    high       DOUBLE PRECISION NOT NULL,
+    low        DOUBLE PRECISION NOT NULL,
+    close      DOUBLE PRECISION NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (user_id, symbol, timeframe, ts)
+);
+
+-- ==================================================================
 -- Row Level Security. El service-role bypassa TODO esto automaticamente;
 -- estas politicas aplican al frontend (rol authenticated con su JWT).
 -- ==================================================================
@@ -294,6 +315,13 @@ CREATE POLICY bot_state_owner_select ON public.bot_state
 ALTER TABLE public.bot_positions ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS bot_positions_owner_select ON public.bot_positions;
 CREATE POLICY bot_positions_owner_select ON public.bot_positions
+    FOR SELECT TO authenticated
+    USING (user_id = auth.uid());
+
+-- bot_candles: el usuario solo LEE sus velas (el UPSERT lo hace el bot con service-role).
+ALTER TABLE public.bot_candles ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS bot_candles_owner_select ON public.bot_candles;
+CREATE POLICY bot_candles_owner_select ON public.bot_candles
     FOR SELECT TO authenticated
     USING (user_id = auth.uid());
 

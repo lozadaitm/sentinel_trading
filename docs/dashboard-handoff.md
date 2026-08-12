@@ -113,6 +113,14 @@ Cuatro tablas en el schema `public`. Todas con FK a `auth.users(id)` y RLS por u
   posiciones y % win/loss — ver mapeo de métricas actualizado abajo. `bot_logs` sigue siendo el
   feed de eventos (útil para ver HEALER/UNWIND/VCB/SYSTEM/ERROR con contexto), no lo elimines.
 
+**`bot_candles`** — velas OHLC para la gráfica del dashboard (migración 006):
+- `user_id`, `symbol`, `timeframe` (hoy solo `M15`), `ts` (apertura de la vela), `open/high/low/close`
+  DOUBLE, `updated_at`. PK `(user_id, symbol, timeframe, ts)`. RLS `FOR SELECT` al dueño.
+- Las publica SOLO el proceso m15 (una fuente por cuenta): backfill de ~400 al arrancar (+ poda
+  >30 días) y upsert de las 2 últimas por heartbeat. `ts` en hora del servidor MT5 tratada como
+  UTC — mismo criterio que `bot_positions.open_time` (velas y marcadores alineados sin corregir TZ).
+  Ver `bot/main.py::_publish_candles` y `bot/db.py::upsert_candles`.
+
 **CAVEAT crítico — schema drift de la columna de tiempo.** El SQL declara `created_at`, pero la
 tabla `bot_logs` **viva en producción** usa `ts`. **Antes de ordenar/filtrar por tiempo, verifica
 contra la BD real** cuál existe (introspección o probar `ts` y caer a `created_at`). No asumas.

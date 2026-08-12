@@ -322,6 +322,49 @@ class Database:
             pass
 
     # ==============================================================
+    # Velas OHLC (bot_candles): datos de precio para la grafica del
+    # dashboard. Solo las publica el proceso m15 (ver bot/main.py).
+    # ==============================================================
+    def upsert_candles(self, rows):
+        """Upsert de velas en bot_candles. Best-effort.
+
+        Cada row trae symbol/timeframe/ts/open/high/low/close; user_id y
+        updated_at se completan aqui. La vela en formacion se re-upsertea en
+        cada heartbeat (mismo ts -> se actualiza OHLC).
+        """
+        if self.client is None or not rows:
+            return
+        now_iso = _utcnow_iso()
+        for row in rows:
+            row.setdefault("user_id", config.USER_ID)
+            row["updated_at"] = now_iso
+        try:
+            self.client.table("bot_candles").upsert(
+                rows, on_conflict="user_id,symbol,timeframe,ts"
+            ).execute()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def prune_candles(self, days=30):
+        """Borra velas mas viejas que `days` (retencion). Best-effort.
+
+        El pequeño desfase entre la hora del servidor MT5 (dominio de ts) y
+        UTC es irrelevante a escala de 30 dias.
+        """
+        if self.client is None:
+            return
+        cutoff = (
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(days=days)
+        ).isoformat()
+        try:
+            self.client.table("bot_candles").delete().eq(
+                "user_id", config.USER_ID
+            ).lt("ts", cutoff).execute()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ==============================================================
     # Logging (sink no bloqueante + flusher por lotes)
     # ==============================================================
     def log_sink(self, log_type, message, ts, price=0.0, lots=0.0, balance=0.0, ticket=0):

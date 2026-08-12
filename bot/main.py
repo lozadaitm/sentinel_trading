@@ -119,6 +119,11 @@ def setup(logger=None, engine_cls=None):
         engine.last_flow_ticket = max(
             (d.ticket for d in broker.capital_flows(0)), default=0)
 
+    # Backfill de velas para la grafica del dashboard + poda de retencion.
+    if config.BOT_ID == "m15":
+        _publish_candles(db, CANDLES_BACKFILL)
+        db.prune_candles(days=CANDLES_KEEP_DAYS)
+
     # Reconciliacion de bot_positions: si alguna quedo marcada OPEN pero ya no
     # existe en MT5 (se cerro con el bot apagado), se cierra ahora con el
     # historial de deals. Evita posiciones "fantasma" en el dashboard.
@@ -164,6 +169,42 @@ def _bot_status(engine):
 
 def _epoch_to_iso(epoch):
     return datetime.datetime.fromtimestamp(epoch, tz=datetime.timezone.utc).isoformat()
+
+
+# Velas para la grafica del dashboard (bot_candles). Solo las publica el
+# proceso m15: una unica fuente por cuenta (los dos motores ven el mismo feed).
+CANDLES_BACKFILL = 400   # ~4 dias de M15 al arrancar
+CANDLES_KEEP_DAYS = 30   # retencion en la tabla
+CANDLES_HEARTBEAT = 2    # la vela en formacion + la previa, por heartbeat
+
+
+def _candle_rows(rates):
+    """Filas para bot_candles desde copy_rates_from_pos. `ts` conserva el
+    mismo criterio que bot_positions.open_time (hora del servidor como UTC),
+    asi la grafica alinea velas y marcadores sin corregir zonas horarias."""
+    return [
+        {
+            "symbol": config.SYMBOL,
+            "timeframe": "M15",
+            "ts": _epoch_to_iso(int(r["time"])),
+            "open": float(r["open"]),
+            "high": float(r["high"]),
+            "low": float(r["low"]),
+            "close": float(r["close"]),
+        }
+        for r in (rates if rates is not None else [])
+    ]
+
+
+def _publish_candles(db, count):
+    """Upsert de las ultimas `count` velas M15. Best-effort, solo m15."""
+    if config.BOT_ID != "m15":
+        return
+    try:
+        rates = mt5.copy_rates_from_pos(config.SYMBOL, config.TIMEFRAME_CORE, 0, count)
+        db.upsert_candles(_candle_rows(rates))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _open_position_row(p):
@@ -358,6 +399,9 @@ def trading_loop(db, engine, logger, stop_event=None):
                         _check_profit_target(db, engine, logger, info)
                 except Exception:  # noqa: BLE001
                     pass
+
+                # Velas para la grafica (la en formacion + la previa).
+                _publish_candles(db, CANDLES_HEARTBEAT)
 
                 # Posiciones para el dashboard (bot_positions): upsert de las
                 # abiertas + cierre de las que desaparecieron desde el ultimo
