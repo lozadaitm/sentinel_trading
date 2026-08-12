@@ -27,14 +27,10 @@ from bot import config  # noqa: E402
 
 
 def _init():
-    kw = {}
-    if config.MT5_PATH:
-        kw["path"] = config.MT5_PATH
-    if config.MT5_LOGIN:
-        kw["login"] = int(config.MT5_LOGIN)
-        kw["server"] = config.MT5_SERVER
-        kw["password"] = config.MT5_PASSWORD
-    if not mt5.initialize(**kw):
+    # kwargs centralizados (bot/config.py): incluyen `portable` y `timeout`.
+    # Construirlos a mano aqui lanzaba los clones portables en modo normal
+    # (perfil nuevo + asistente de primera ejecucion => IPC timeout).
+    if not mt5.initialize(**config.mt5_init_kwargs()):
         raise SystemExit(f"No se pudo inicializar MT5: {mt5.last_error()}")
     if not mt5.symbol_select(config.SYMBOL, True):
         print(f"[ALERTA] no se pudo seleccionar {config.SYMBOL}")

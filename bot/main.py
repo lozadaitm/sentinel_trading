@@ -51,24 +51,6 @@ def disable_quickedit():
         pass
 
 
-def _mt5_init_kwargs():
-    """Argumentos de mt5.initialize() para atacar el terminal de ESTA instancia.
-
-    Vacio => terminal por defecto (comportamiento legacy). Con MT5_LOGIN se
-    conecta a la cuenta Vantage concreta; con MT5_PATH se abre ese terminal64.exe.
-    """
-    kw = {}
-    if config.MT5_PATH:
-        kw["path"] = config.MT5_PATH
-    if config.MT5_LOGIN:
-        kw["login"] = int(config.MT5_LOGIN)
-        kw["server"] = config.MT5_SERVER
-        kw["password"] = config.MT5_PASSWORD
-    if config.MT5_PORTABLE:
-        kw["portable"] = True
-    return kw
-
-
 def _log_file_name():
     """Nombre del CSV local. El M15 conserva el historico; los demas bots
     escriben su propio archivo para no mezclar dos motores en un mismo log."""
@@ -90,7 +72,7 @@ def setup(logger=None, engine_cls=None):
     # los dos motores se verian las posiciones mutuamente. Aborta el arranque.
     identity_warnings = config.validate_identity()
 
-    if not mt5.initialize(**_mt5_init_kwargs()):
+    if not mt5.initialize(**config.mt5_init_kwargs()):
         raise RuntimeError(f"No se pudo inicializar MetaTrader 5: {mt5.last_error()}")
 
     if not mt5.symbol_select(config.SYMBOL, True):

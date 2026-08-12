@@ -135,6 +135,32 @@ MT5_PASSWORD = os.environ.get("MT5_PASSWORD", "")
 # los datos viven dentro de la carpeta del clon, no en AppData).
 MT5_PORTABLE = os.environ.get("MT5_PORTABLE", "").lower() in ("1", "true", "yes")
 
+# Timeout de mt5.initialize() en ms. El default de la libreria (60 s) se queda
+# corto en el PRIMER arranque de un clon portable (crea perfil, sincroniza).
+MT5_TIMEOUT_MS = int(os.environ.get("MT5_TIMEOUT_MS", "120000"))
+
+
+def mt5_init_kwargs():
+    """Argumentos de mt5.initialize() para atacar el terminal de ESTA instancia.
+
+    UNICA fuente de verdad: la usan bot/main.py y los scripts de auditoria.
+    Olvidar `portable` en un clon portable lanza el terminal en modo normal
+    (perfil nuevo en AppData + asistente de primera ejecucion => IPC timeout).
+
+    Vacio => terminal por defecto (comportamiento legacy). Con MT5_LOGIN se
+    conecta a la cuenta concreta; con MT5_PATH se abre ese terminal64.exe.
+    """
+    kw = {"timeout": MT5_TIMEOUT_MS}
+    if MT5_PATH:
+        kw["path"] = MT5_PATH
+    if MT5_LOGIN:
+        kw["login"] = int(MT5_LOGIN)
+        kw["server"] = MT5_SERVER
+        kw["password"] = MT5_PASSWORD
+    if MT5_PORTABLE:
+        kw["portable"] = True
+    return kw
+
 # ==================================================================
 # RESEND (bot/notify.py) - notificaciones por correo al usuario.
 # Sin RESEND_API_KEY el modulo queda inerte (el evento igual queda en DB).

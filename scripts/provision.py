@@ -107,12 +107,33 @@ def _find_supabase_creds():
     return "", ""
 
 
+def _enable_algo_trading(clone_dir):
+    """Deja el Algo Trading (AutoTrading) habilitado desde el primer arranque.
+
+    En modo portable el terminal lee su configuracion de <clon>\\config\\
+    common.ini. Sin el boton activo, mt5.order_send() devuelve retcode 10027
+    (client disables autotrading) y el bot puede leer pero no operar. Se
+    escribe la seccion [Experts] ANTES del primer arranque; si el archivo ya
+    existe (clon ya arrancado alguna vez) no se pisa: en ese caso el estado
+    del boton ya es el que dejo el operador.
+    """
+    cfg_dir = os.path.join(clone_dir, "config")
+    ini_path = os.path.join(cfg_dir, "common.ini")
+    if os.path.exists(ini_path):
+        return
+    os.makedirs(cfg_dir, exist_ok=True)
+    with open(ini_path, "w", encoding="utf-16") as f:  # MT5 usa UTF-16 en sus .ini
+        f.write("[Experts]\nAllowLiveTrading=1\nAllowDllImport=0\nEnabled=1\n")
+    print("    Algo Trading habilitado (config/common.ini del clon).")
+
+
 def _clone_mt5(login):
     """Copia la instalacion base a un clon propio del login. Idempotente."""
     clone_dir = os.path.join(MT5_CLONES_DIR, f"mt5_{login}")
     exe = os.path.join(clone_dir, "terminal64.exe")
     if os.path.exists(exe):
         print(f"    clon MT5 ya existe: {clone_dir}")
+        _enable_algo_trading(clone_dir)
         return exe
     base_exe = os.path.join(MT5_BASE_DIR, "terminal64.exe")
     if not os.path.exists(base_exe):
@@ -122,6 +143,7 @@ def _clone_mt5(login):
     print(f"    clonando {MT5_BASE_DIR} -> {clone_dir} (puede tardar)...")
     os.makedirs(MT5_CLONES_DIR, exist_ok=True)
     shutil.copytree(MT5_BASE_DIR, clone_dir)
+    _enable_algo_trading(clone_dir)
     return exe
 
 
