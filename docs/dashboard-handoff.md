@@ -121,6 +121,15 @@ Cuatro tablas en el schema `public`. Todas con FK a `auth.users(id)` y RLS por u
   BOT revierte `is_active=true` a close-only (`bot/db.py::has_pending_commission` + guard en el
   heartbeat de `bot/main.py`).
 
+**`invites` / `provision_requests`** — signup privado + cola de provisión (migración 008):
+- El admin genera códigos de un solo uso (link `/signup?invite=CODIGO`); el invitado se
+  registra con todos los datos de su instancia (label, MT5 login/servidor/password de trading,
+  símbolo). El webapp crea el auth user, siembra `bot_instances`/`bot_config` y encola la fila.
+- En el VPS, `scripts/provision.py` procesa las PENDING: clona la instalación base de MT5 a
+  `C:\MT5_instances\mt5_<login>` (modo portable, `MT5_PORTABLE=true` en el .env), escribe
+  `instances/<user_id>.env` y borra `mt5_password` de la DB. Arranque: `scripts\start_all.ps1`.
+- RLS sin políticas (solo service-role) en ambas tablas.
+
 **`bot_candles`** — velas OHLC para la gráfica del dashboard (migración 006):
 - `user_id`, `symbol`, `timeframe` (hoy solo `M15`), `ts` (apertura de la vela), `open/high/low/close`
   DOUBLE, `updated_at`. PK `(user_id, symbol, timeframe, ts)`. RLS `FOR SELECT` al dueño.

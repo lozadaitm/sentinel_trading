@@ -131,6 +131,9 @@ MT5_PATH = os.environ.get("MT5_PATH", "")       # ruta al terminal64.exe de esa 
 MT5_LOGIN = os.environ.get("MT5_LOGIN", "")     # login numerico de la cuenta
 MT5_SERVER = os.environ.get("MT5_SERVER", "")   # servidor del broker
 MT5_PASSWORD = os.environ.get("MT5_PASSWORD", "")
+# true = terminal en modo /portable (clones creados por scripts/provision.py:
+# los datos viven dentro de la carpeta del clon, no en AppData).
+MT5_PORTABLE = os.environ.get("MT5_PORTABLE", "").lower() in ("1", "true", "yes")
 
 # ==================================================================
 # RESEND (bot/notify.py) - notificaciones por correo al usuario.

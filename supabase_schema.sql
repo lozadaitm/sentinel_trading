@@ -248,6 +248,46 @@ CREATE INDEX IF NOT EXISTS idx_bot_positions_user_open_time
     ON public.bot_positions (user_id, open_time DESC);
 
 -- ==================================================================
+-- invites / provision_requests  |  Signup privado + cola de provision.
+--   invites: codigos de un solo uso que genera el operador (admin) para el
+--   registro privado (/signup?invite=CODIGO). provision_requests: datos MT5
+--   que el invitado rellena al registrarse; scripts/provision.py (VPS) los
+--   convierte en una instancia real (clon portable de MT5 + .env) y BORRA
+--   mt5_password de la DB. RLS habilitada SIN politicas: solo service-role.
+--   Ver migrations/008_signup_provisioning.sql.
+-- ==================================================================
+CREATE TABLE IF NOT EXISTS public.invites (
+    code       TEXT PRIMARY KEY,
+    note       TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    used_at    TIMESTAMPTZ,
+    used_by    UUID REFERENCES auth.users(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS public.provision_requests (
+    id             BIGSERIAL PRIMARY KEY,
+    user_id        UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    email          TEXT NOT NULL,
+    label          TEXT,
+    symbol         TEXT NOT NULL DEFAULT 'XAUUSD+',
+    bots           TEXT NOT NULL DEFAULT 'm15,m5',
+    mt5_login      BIGINT NOT NULL,
+    mt5_server     TEXT NOT NULL,
+    mt5_password   TEXT,
+    status         TEXT NOT NULL DEFAULT 'PENDING',
+    error          TEXT,
+    provisioned_at TIMESTAMPTZ,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_provision_requests_status
+    ON public.provision_requests (status, created_at);
+
+ALTER TABLE public.invites            ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.provision_requests ENABLE ROW LEVEL SECURITY;
+-- (sin politicas: solo service-role)
+
+-- ==================================================================
 -- bot_candles  |  Velas OHLC para la grafica del dashboard.
 --   Las publica SOLO el proceso m15 (una fuente por cuenta): backfill de
 --   ~400 velas M15 al arrancar (+ poda >30 dias) y upsert de las 2 ultimas

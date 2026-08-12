@@ -64,6 +64,8 @@ def _mt5_init_kwargs():
         kw["login"] = int(config.MT5_LOGIN)
         kw["server"] = config.MT5_SERVER
         kw["password"] = config.MT5_PASSWORD
+    if config.MT5_PORTABLE:
+        kw["portable"] = True
     return kw
 
 
