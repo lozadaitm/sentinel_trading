@@ -309,12 +309,14 @@ def _check_profit_target(db, engine, logger, info):
                  f"OBJETIVO DE GANANCIA alcanzado: +{profit_pct:.2f}% >= {float(target):g}%. "
                  f"Equity {info.equity:.2f} / base {base:.2f}. Bots del usuario en close-only.",
                  balance=info.balance)
+    mail_kwargs = dict(profit_pct=profit_pct, target_pct=float(target),
+                       equity=info.equity, base=base, symbol=config.SYMBOL)
     notify.send_async(
         engine.user_email,
         "Sentinel: objetivo de ganancia alcanzado",
-        notify.profit_target_body(profit_pct=profit_pct, target_pct=float(target),
-                                  equity=info.equity, base=base, symbol=config.SYMBOL),
+        notify.profit_target_body(**mail_kwargs),
         logger,
+        html=notify.profit_target_html(**mail_kwargs),
     )
 
 

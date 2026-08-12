@@ -140,6 +140,8 @@ MT5_PASSWORD = os.environ.get("MT5_PASSWORD", "")
 # ==================================================================
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 RESEND_FROM = os.environ.get("RESEND_FROM", "Sentinel <onboarding@resend.dev>")
+# URL publica del dashboard (CTA de los correos).
+DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "https://sentinel-trading-webapp.vercel.app/")
 
 # ==================================================================
 # NEWSGUARD (bot/news.py)  - snapshot del calendario economico
