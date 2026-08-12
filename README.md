@@ -1,22 +1,30 @@
 # Sentinel — Bot de Trading (Hyper Grinder v20)
 
 Port en Python del Expert Advisor MQL5 original. Opera vía **MetaTrader 5** sobre
-`XAUUSD` y se controla en caliente desde **Supabase** (Postgres cloud).
+`XAUUSD+` y se controla en caliente desde **Supabase** (Postgres cloud). El usuario
+final lo maneja desde el **dashboard web** (repo separado `sentinel_trading-webapp`,
+Next.js en Vercel: https://sentinel-trading-webapp.vercel.app/).
+
+**Dos motores sobre la misma cuenta**, coordinados por magic number:
+- **m15 — Sentinel** (`bot/strategy.py`): motor principal. Entradas SMC, cobertura
+  (Hedge Lock), Healer, recovery/rescate. Sin stop loss por diseño.
+- **m5 — Grinder** (`bot/strategy_m5.py`): scalper junior. Una posición viva, siempre
+  con SL; cede margen al M15 (gobierno de margen en `bot/budget.py`).
 
 **Multi-instancia:** un proceso = un usuario = una cuenta Vantage = un terminal MT5.
-Cada usuario corre su propia instancia del bot en el VPS. La identidad
-(`user_id`, `symbol`, credenciales MT5) se pasa por un archivo `.env` por instancia.
+Cada usuario corre su(s) motor(es) en el VPS con un `.env` por instancia.
 
 **Control:** cada usuario enciende/apaga su bot con `bot_instances.is_active`:
 - `true`  → **operando** (abre nuevas posiciones y gestiona todo).
 - `false` → **close-only**: NO abre nada nuevo pero sigue gestionando y cerrando lo
-  abierto hasta quedar plano (no abandona posiciones). No es un pausa/kill duro.
+  abierto hasta quedar plano (no abandona posiciones). No es una pausa/kill duro.
 
 ## Requisitos
 
 - **Windows** (la librería `MetaTrader5` solo funciona en Windows).
 - **Python 3.10+**.
-- **Terminal de MetaTrader 5** de la cuenta Vantage (una instalación por cuenta si son varias — ver [Multi-instancia](#multi-instancia-varias-cuentas)).
+- **Terminal de MetaTrader 5** por cuenta (los clones portables los crea el provisioner;
+  ver [Alta automática](#a-alta-automática-recomendada-signup-por-invitación)).
 - **Proyecto Supabase** con el esquema cargado.
 
 ## Instalación
@@ -33,8 +41,21 @@ pip install -r requirements.txt
 ## Setup inicial del proyecto (una sola vez)
 
 1. Crear un proyecto en [Supabase](https://supabase.com).
-2. En **SQL Editor**, correr [`supabase_schema.sql`](supabase_schema.sql). Crea las tablas
-   `bot_instances`, `bot_config` y `bot_logs`, con FKs a `auth.users` y RLS.
+2. En **SQL Editor**, correr [`supabase_schema.sql`](supabase_schema.sql) (esquema
+   canónico completo). Para una base que ya existía, aplicar en orden las migraciones
+   pendientes de [`migrations/`](migrations/) — cada archivo indica en su cabecera si
+   ya fue aplicada:
+
+   | Migración | Qué añade |
+   |-----------|-----------|
+   | `002_bot_id.sql` | multi-bot (`bot_id` en las 5 tablas, PKs compuestas) |
+   | `003_disable_m15_grinder.sql` | desactiva el grinder embebido del M15 |
+   | `004_profit_target.sql` | `account_settings` (objetivo de ganancia) + `bot_instances.force_close` |
+   | `005_capital_flows.sql` | `bot_state.last_flow_ticket` (base ajustada por depósitos/retiros) |
+   | `006_candles.sql` | `bot_candles` (velas OHLC para la gráfica del dashboard) |
+   | `007_withdrawals.sql` | `billing_settings` + `withdrawals` (comisión USDT de retiros) |
+   | `008_signup_provisioning.sql` | `invites` + `provision_requests` (signup privado) |
+
 3. Anotar del dashboard (**Project Settings → API**):
    - **Project URL** → `SUPABASE_URL`.
    - **service_role key** (secreta) → `SUPABASE_SERVICE_ROLE_KEY`. El bot la usa para
@@ -42,44 +63,73 @@ pip install -r requirements.txt
 
 ## Alta de un nuevo usuario / instancia
 
-Repetir estos pasos por cada usuario que vaya a correr el bot.
+### A. Alta automática (recomendada): signup por invitación
 
-### 1. Crear el usuario en Supabase Auth
-
-Dashboard → **Authentication → Users → Add user** (email + password). Copiar su **User UID**
-(un UUID). Ese UUID es el `user_id` en todas las tablas y en el `.env`.
-
-> El `user_id` **debe** ser el `auth.users.id` real: la RLS del frontend se basa en
-> `auth.uid() = user_id`.
-
-### 2. Crear sus filas en la base de datos
-
-En el **SQL Editor**, reemplazando `<USER_UUID>` y `<SYMBOL>`:
-
-```sql
--- Interruptor maestro del usuario (arranca apagado / close-only).
-insert into public.bot_instances (user_id, label, account_login, is_active)
-values ('<USER_UUID>', 'Cuenta Vantage', 12345678, false)
-on conflict (user_id) do nothing;
-
--- Config de estrategia para su símbolo (arranca incluida).
-insert into public.bot_config (user_id, symbol, is_active, status)
-values ('<USER_UUID>', '<SYMBOL>', true, 'INACTIVE')
-on conflict (user_id, symbol) do nothing;
-```
-
-Los ~60 parámetros de estrategia usan sus defaults; se ajustan editando esa fila de
-`bot_config` (o desde el frontend).
-
-### 3. Crear el `.env` de la instancia
-
-Copiar la plantilla a `instances/<USER_UUID>.env`. Los `.env` de `instances/` **no** se
-commitean (`.gitignore`), salvo `example.env`.
+1. Un admin del dashboard genera un **código de invitación** en `/dashboard/admin`
+   (sección *Invitaciones de registro*) y envía el link
+   `https://<dashboard>/signup?invite=CODIGO`.
+2. El invitado se registra con todos los datos: nombre de cuenta, email+password del
+   panel, y su MT5 (login, servidor, **password de trading**, símbolo). El webapp crea
+   el usuario en Auth, siembra `bot_instances` (m15+m5, apagados) y `bot_config`
+   (defaults), y encola una fila en `provision_requests`.
+3. En el VPS, el **provisioner** ([`scripts/provision.py`](scripts/provision.py))
+   procesa la cola: clona la instalación base de MT5 a `C:\MT5_instances\mt5_<login>`
+   (modo portable), escribe `instances/<user_id>.env` completo y marca la solicitud
+   como READY **borrando la password MT5 de la DB**.
 
 ```powershell
-Copy-Item instances\example.env instances\<USER_UUID>.env
-notepad instances\<USER_UUID>.env
+python -m scripts.provision            # procesa las PENDING y termina
+python -m scripts.provision --watch    # queda vigilando (poll cada 60 s)
+python -m scripts.provision --start    # además lanza los motores (modo consola)
 ```
+
+Config del provisioner por entorno: `MT5_BASE_DIR` (instalación a clonar; default
+`C:\Program Files\MetaTrader 5`) y `MT5_CLONES_DIR` (default `C:\MT5_instances`).
+
+**En este VPS ya corre solo**: la tarea programada **`SentinelProvisioner`**
+(Task Scheduler, como SYSTEM) ejecuta el modo one-shot **cada 5 minutos** y escribe su
+salida en `logs\provision.log`. Comandos utilitarios:
+
+```powershell
+Get-ScheduledTaskInfo -TaskName "SentinelProvisioner"      # última corrida y resultado (0 = OK)
+Start-ScheduledTask   -TaskName "SentinelProvisioner"      # forzar una corrida ya
+Disable-ScheduledTask -TaskName "SentinelProvisioner"      # pausar la provisión automática
+Enable-ScheduledTask  -TaskName "SentinelProvisioner"      # reanudarla
+Unregister-ScheduledTask -TaskName "SentinelProvisioner"   # eliminarla
+Get-Content logs\provision.log -Tail 20                    # ver el log del provisioner
+```
+
+> La tarea NO lanza los motores: provisiona la instancia y el arranque sigue siendo
+> `scripts\start_all.ps1` (preflight + tests + auditorías). La instancia nace con
+> `is_active=false`, así que nada opera hasta encender el toggle en el dashboard.
+
+### B. Alta manual (fallback)
+
+<details>
+<summary>Pasos manuales (lo que el signup automatiza)</summary>
+
+1. **Usuario en Supabase Auth**: Dashboard → Authentication → Users → Add user.
+   Copiar su **User UID** (= `user_id` en todas las tablas y en el `.env`).
+2. **Filas en la base** (SQL Editor), una por motor:
+
+```sql
+insert into public.bot_instances (user_id, bot_id, label, account_login, is_active)
+values ('<USER_UUID>', 'm15', 'Cuenta Vantage', 12345678, false),
+       ('<USER_UUID>', 'm5',  'Cuenta Vantage', 12345678, false)
+on conflict (user_id, bot_id) do nothing;
+
+insert into public.bot_config (user_id, symbol, bot_id, is_active)
+values ('<USER_UUID>', 'XAUUSD+', 'm15', true),
+       ('<USER_UUID>', 'XAUUSD+', 'm5',  true)
+on conflict (user_id, symbol, bot_id) do nothing;
+```
+
+3. **`.env` de la instancia**: copiar `instances\example.env` a
+   `instances\<USER_UUID>.env` y rellenarlo (los `.env` de `instances/` no se
+   commitean, salvo las plantillas).
+</details>
+
+### El `.env` de una instancia
 
 ```ini
 # Supabase (igual para todas las instancias del proyecto)
@@ -91,33 +141,37 @@ USER_ID=<USER_UUID>
 SYMBOL=XAUUSD+
 
 # Motores a levantar sobre esta cuenta: m15 | m15,m5
-BOTS=m15
+BOTS=m15,m5
 MAGIC_M15=100100
 MAGIC_M5=100200
 
-# Terminal MT5 de la cuenta Vantage de este usuario
-MT5_PATH=C:\Program Files\MetaTrader 5\terminal64.exe
+# Terminal MT5 de la cuenta de este usuario (clon propio; ver abajo)
+MT5_PATH=C:\MT5_instances\mt5_12345678\terminal64.exe
 MT5_LOGIN=12345678
 MT5_SERVER=VantageInternational-Live
-MT5_PASSWORD=<password_de_la_cuenta>
+MT5_PASSWORD=<password_de_trading>
+MT5_PORTABLE=true
+
+# Opcional
+# SHADOW_MODE=true          # decide y loguea, pero NO envía órdenes
+# RESEND_API_KEY=re_xxx     # notificaciones por correo (bot/notify.py)
+# RESEND_FROM=Sentinel <alertas@tu-dominio.com>
+# DASHBOARD_URL=https://sentinel-trading-webapp.vercel.app/
 ```
 
-- **Un fichero por usuario, no por bot.** Sobre la misma cuenta pueden correr el
-  Sentinel M15 y el Grinder M5: comparten credenciales y solo difieren en `BOT_ID`
-  y `MAGIC_NUMBER`, que **inyecta el launcher** a partir de `BOTS` y de
-  `MAGIC_M15`/`MAGIC_M5`. No dupliques el `.env`.
-- `MAGIC_M15` y `MAGIC_M5` deben ser **distintos**: son lo que permite a cada motor
-  ver solo sus posiciones y a la vez leer la cesta del vecino para calcular la
-  reserva de margen (`bot/budget.py`). El preflight aborta si coinciden.
-- Antes de añadir `m5` a `BOTS`: aplicar `migrations/002_bot_id.sql`, crear su fila
-  de `bot_config`/`bot_instances` y actualizar el dashboard para filtrar por `bot_id`.
-- Si dejas `MT5_*` vacíos, el bot se conecta al terminal MT5 que ya esté **abierto y logueado**.
-- Si los rellenas, el bot **abre y loguea** ese terminal por sí mismo.
+- **Un fichero por usuario, no por bot.** Sobre la misma cuenta corren el Sentinel M15
+  y el Grinder M5: comparten credenciales y solo difieren en `BOT_ID` y `MAGIC_NUMBER`,
+  que **inyecta el launcher** a partir de `BOTS` y de `MAGIC_M15`/`MAGIC_M5`.
+- `MAGIC_M15` y `MAGIC_M5` deben ser **distintos**: son lo que permite a cada motor ver
+  solo sus posiciones y a la vez leer la cesta del vecino para la reserva de margen
+  (`bot/budget.py`). El preflight aborta si coinciden.
+- `MT5_PORTABLE=true` para los clones creados por el provisioner (los datos viven en la
+  carpeta del clon, no en AppData).
+- Si dejas `MT5_*` vacíos, el bot se conecta al terminal que ya esté abierto y logueado.
 
-> El `.env` de la **raíz** del repo actúa como capa de respaldo: `bot/config.py`
-> lo carga con `setdefault()`, así que el de la instancia siempre gana. Sirve para
-> claves comunes a todos los usuarios (p. ej. `SUPABASE_*`). No pongas ahí `BOT_ID`
-> ni `MAGIC_NUMBER`.
+> El `.env` de la **raíz** del repo actúa como capa de respaldo: `bot/config.py` lo
+> carga con `setdefault()`, así que el de la instancia siempre gana. Sirve para claves
+> comunes (`SUPABASE_*`, `RESEND_*`). No pongas ahí `BOT_ID` ni `MAGIC_NUMBER`.
 
 ## Arranque completo (recomendado)
 
@@ -126,7 +180,7 @@ powershell -ExecutionPolicy Bypass -File scripts\start_all.ps1
 ```
 
 Encadena en el orden correcto todo lo necesario y **aborta antes de operar** si algo
-no cuadra, para que no se pueda arrancar en un estado incoherente:
+no cuadra:
 
 | Fase | Qué hace | Si falla |
 |------|----------|----------|
@@ -135,110 +189,108 @@ no cuadra, para que no se pueda arrancar en un estado incoherente:
 | 3. Auditorías | `audit_margin` (siempre) + `audit_m5_signals` (si la última tiene más de 30 días) | aborta solo si MT5 no responde |
 | 4. Lanzamiento | una ventana de PowerShell por bot, con la TUI. M15 primero | — |
 
-El preflight caza el fallo de configuración más caro: copiar el `.env` del M15 y
-cambiar solo `BOT_ID` dejando el mismo `MAGIC_NUMBER`. Los dos motores compartirían
-magic y cada uno vería las posiciones del otro como propias.
-
-Las auditorías son read-only y se archivan con fecha en `logs/audits/`, así queda
-histórico de cómo estaba la cuenta en cada arranque. Si `audit_margin` dice que el
-peor caso de la escalera **NO CABE** en el equity, pide confirmación antes de seguir.
-
 | Flag | Para qué |
 |------|----------|
-| `-M15Only` | levantar solo el Sentinel (mientras el M5 esté en validación) |
+| `-M15Only` | levantar solo el Sentinel |
 | `-SkipAudits` | reinicio rápido el mismo día |
 | `-ForceAudits` | repetir `audit_m5_signals` aunque sea reciente |
 | `-DryRun` | preflight + tests + auditorías, sin lanzar los bots |
 | `-NoUI` | modo consola en vez de TUI |
 | `-SkipTests` | saltar la regresión (no recomendado tras un `git pull`) |
 
+Las auditorías son read-only y se archivan con fecha en `logs/audits/`. Si
+`audit_margin` dice que el peor caso de la escalera **NO CABE** en el equity, pide
+confirmación antes de seguir.
+
 ## Arranque de una instancia suelta
 
-Desde la raíz del proyecto. El launcher carga el `.env` indicado y arranca el proceso.
-
-### Modo consola
-
 ```powershell
+# Consola (m15; para el m5 añade -BotId m5)
 powershell -ExecutionPolicy Bypass -File scripts\run_instance.ps1 instances\<USER_UUID>.env
-```
 
-Salida esperada:
-
-```
-HYPER GRINDER v20.0 (Python) INICIADO. user=<USER_UUID> symbol=XAUUSD+
-```
-
-### Modo TUI (interfaz en vivo)
-
-```powershell
+# TUI en vivo (gráfica M15, HUD de entrada, log)
 powershell -ExecutionPolicy Bypass -File scripts\run_instance.ps1 instances\<USER_UUID>.env -Module bot.tui
-```
+powershell -ExecutionPolicy Bypass -File scripts\run_instance.ps1 instances\<USER_UUID>.env -BotId m5 -Module bot.tui_m5
 
-Muestra en tiempo real: gráfica de velas M15, **HUD ENTRADA OP1** (*actual vs requerido*)
-y el **LOG** de eventos.
-
-| Tecla | Acción |
-|-------|--------|
-| `p` | Mostrar/ocultar panel de **parámetros** (`bot_config`) |
-| `↑`/`↓` `PgUp`/`PgDn` | Desplazar el log |
-| `Fin` | Volver al log en vivo |
-| `q` | Salir (shutdown ordenado; marca `bot_status=STOPPED`) |
-
-### Levantar TODAS las instancias a la vez
-
-```powershell
+# Levantar todas las instancias de instances\*.env
 powershell -ExecutionPolicy Bypass -File scripts\launch_all.ps1
 ```
 
-Abre una ventana por cada `instances\*.env` (ignora `example.env`).
+Teclas de la TUI: `p` parámetros · `↑`/`↓` `PgUp`/`PgDn` desplazar log · `Fin` log en
+vivo · `q` salir (shutdown ordenado, `bot_status=STOPPED`).
 
-## Control en caliente
+## Integración con el dashboard
 
-El bot relee `bot_instances` y `bot_config` cada pocos segundos (no reinicia el proceso):
+El bot **lee** el control del usuario y **publica** todo lo que el dashboard muestra
+(heartbeat cada ~15 s; control refresco cada ~3 s):
 
-- **`bot_instances.is_active`** (interruptor del usuario):
-  `true` = operando · `false` = close-only (gestiona/cierra, no abre).
-- **`bot_config.is_active`** — incluye/excluye ese símbolo.
+| El bot LEE | Para qué |
+|------------|----------|
+| `bot_instances.is_active` | operar vs close-only |
+| `bot_instances.force_close` | **cierre forzado**: el usuario asume el flotante; el bot cierra todo (verificando retcode, con reintento hasta quedar plano) y consume el comando |
+| `bot_config.*` | ~60 parámetros de estrategia, editables en caliente |
+| `account_settings.profit_target_pct` | **objetivo de ganancia** de la cuenta (en equity vs saldo inicial). Al alcanzarlo: claim atómico (un solo email aunque corran m15+m5), ambos motores a close-only, correo vía Resend y log `TARGET` |
+| `withdrawals.status='PENDING'` | **gate de comisión**: con una comisión de retiro sin pagar, el bot revierte `is_active=true` a close-only |
 
-El bot **reporta su estado** de vuelta en `bot_instances`: `bot_status`
-(`RUNNING` / `CLOSE_ONLY` / `FLAT` / `ERROR` / `STOPPED`) y `last_heartbeat` (para
-saber si está online). Los logs se persisten en `bot_logs` con el `user_id` de la instancia.
+| El bot ESCRIBE | Qué es |
+|----------------|--------|
+| `bot_instances.bot_status/last_heartbeat` | estado (`RUNNING/CLOSE_ONLY/FLAT/ERROR/STOPPED`) y online/offline |
+| `bot_state` | snapshot vivo: balance, equity, márgenes, flotante, `initial_balance` (capturado de MT5 en la primera corrida y **auto-ajustado por depósitos/retiros** — deals BALANCE/CREDIT, ancla `last_flow_ticket`) |
+| `bot_positions` | posiciones abiertas (refresco por heartbeat) e histórico con P&L total al cerrarse |
+| `bot_candles` | velas M15 para la gráfica (solo las publica el proceso m15: backfill ~400 + las 2 últimas por heartbeat; poda >30 días) |
+| `bot_logs` | feed de eventos (taxonomía `ENTRADA/PROTECCION/RECOVERY/RESCATE/GRINDER/CIERRE/HEALER/UNWIND/EXITO/TARGET/SYSTEM/VCB/ERROR...`) |
+
+Correos (objetivo alcanzado): `bot/notify.py` vía **Resend** (`RESEND_API_KEY`,
+`RESEND_FROM` con dominio verificado); sin key queda inerte y solo loguea.
 
 ## Modo sombra (pruebas sin órdenes reales)
 
-Poner `SHADOW_MODE = True` en `bot/config.py` antes de lanzar. El bot evalúa la estrategia,
-conecta a Supabase y registra decisiones, pero **no** envía órdenes al broker. Recomendado
-para validar una instancia nueva antes de operar en real.
+`SHADOW_MODE=true` en el `.env` de la instancia. El bot evalúa la estrategia, conecta a
+Supabase y registra decisiones, pero **no** envía órdenes al broker. Recomendado para
+validar una instancia nueva antes de operar en real.
 
 ## Detener
 
-`Ctrl + C` en la ventana de la instancia: hace shutdown ordenado (flush de logs pendientes,
+`Ctrl + C` en la ventana de la instancia: shutdown ordenado (flush de logs pendientes,
 `bot_status=STOPPED`, `mt5.shutdown()`).
 
-## Multi-instancia (varias cuentas)
+## Memoria del proyecto
 
-En este VPS puede haber una o varias instancias, cada una con su `.env`. Aviso importante:
-**dos procesos no deben atacar el mismo `terminal64.exe`**. Para varias cuentas Vantage,
-instala MetaTrader 5 en **carpetas portables separadas** (una por cuenta) y apunta cada
-`MT5_PATH` a su terminal. Hoy cada usuario opera **un símbolo**; el esquema ya soporta
-varios símbolos por usuario para el futuro.
+Las decisiones de diseño y su porqué viven en [`docs/memory/`](docs/memory/MEMORY.md)
+(versionada; una línea por memoria en el índice). El contrato de datos completo para el
+dashboard está en [`docs/dashboard-handoff.md`](docs/dashboard-handoff.md).
 
 ## Estructura
 
 ```
 bot/
-  main.py        Entrypoint: setup() / trading_loop() (gate is_active + heartbeat) / shutdown()
-  tui.py         Interfaz de terminal en vivo (gráfica + HUD + log + params)
-  config.py      Identidad + conexión Supabase + attach MT5, todo por entorno/.env
-  broker.py      Capa de órdenes sobre MetaTrader5
-  strategy.py    Motor de estrategia (SentinelEngine) + flag close_only + snapshot HUD
-  indicators.py  Indicadores técnicos
-  db.py          Acceso a Supabase (supabase-py): config, instancia, logs por lotes
-  logger.py      Logging multi-sink: consola/CSV + Supabase (bot_logs) + buffer de la TUI
-supabase_schema.sql   Esquema Supabase (bot_instances, bot_config, bot_logs) + RLS
+  main.py           Entrypoint m15: setup() / trading_loop() / shutdown(). Heartbeat,
+                    objetivo de ganancia, cierre forzado, gate de comisión, flujos, velas
+  main_m5.py        Entrypoint m5 (reusa el mismo loop con M5Engine)
+  strategy.py       Motor Sentinel M15 (SMC + Hedge Lock + Healer + rescate)
+  strategy_m5.py    Motor Grinder M5 (scalper con SL, régimen de rango v2)
+  budget.py         Gobierno de margen entre motores (reserva de protección)
+  ledger.py         CycleLedger: identidad por rol de cada posición del ciclo (JSON local)
+  news.py           NewsGuard: bloqueo por noticias rojas USD (exportador MQL5→JSON)
+  notify.py         Correos vía Resend (objetivo de ganancia)
+  broker.py         Capa de órdenes sobre MetaTrader5 (+ capital_flows, historial deals)
+  db.py             Acceso a Supabase: config, instancia, state, posiciones, velas,
+                    account_settings, withdrawals, logs por lotes
+  tui.py / tui_m5.py  Interfaces de terminal en vivo
+  config.py         Identidad + conexión + attach MT5, todo por entorno/.env
+  indicators.py     Indicadores técnicos
+  logger.py         Logging multi-sink: consola/CSV + Supabase + buffer de la TUI
+supabase_schema.sql   Esquema canónico completo + RLS
+migrations/           Migraciones incrementales (aplicar en orden; ver cabeceras)
 scripts/
-  run_instance.ps1    Arranca una instancia desde su .env (-Module bot.main | bot.tui)
+  start_all.ps1       Arranque completo: preflight + tests + auditorías + lanzamiento
+  run_instance.ps1    Arranca UN motor de UNA instancia desde su .env
   launch_all.ps1      Levanta todas las instancias de instances/*.env
-instances/            Un .env por instancia (no versionados; example.env es la plantilla)
+  provision.py        Provisioner: provision_requests → clon MT5 portable + .env
+  audit_margin.py     ¿Cabe el peor caso de la escalera en el equity de hoy?
+  audit_m5_signals.py Calibración de señales del M5 sobre histórico
+  CalendarExporter.mq5  Exportador del calendario económico para NewsGuard
+instances/            Un .env por usuario (no versionados; example.env es la plantilla)
+docs/                 dashboard-handoff.md + memory/ (memoria versionada del proyecto)
 requirements.txt      Dependencias Python
 ```

@@ -172,4 +172,5 @@ CONTROL_REFRESH = 3
 HEARTBEAT_INTERVAL = 15
 
 # Modo sombra: si True, on_tick loguea decisiones pero NO envia ordenes.
-SHADOW_MODE = False
+# Se activa por entorno/.env (SHADOW_MODE=true), por instancia.
+SHADOW_MODE = os.environ.get("SHADOW_MODE", "").lower() in ("1", "true", "yes")
