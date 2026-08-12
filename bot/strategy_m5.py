@@ -420,20 +420,36 @@ class M5Engine:
 
     def close_all(self, reason):
         """Cierre inmediato de todo lo propio por comando externo (force_close
-        del dashboard). El usuario asume el flotante actual."""
+        del dashboard). El usuario asume el flotante actual.
+
+        Verifica el retcode de cada orden y re-consulta MT5 al final: devuelve
+        True solo si la instancia quedo plana; si no, el caller reintenta.
+        """
+        if self.b.shadow:
+            self.log.write("SHADOW", f"CLOSE ALL ({reason}): sin ordenes reales en modo sombra.")
+            return True
         total = 0.0
         closed = 0
         for p in self._my_positions():
             tkt = p.ticket
             money = p.profit + p.swap
+            res = self.b.close_position(p, "Close: Forzado (usuario)")
+            rc = getattr(res, "retcode", None)
+            if rc not in (mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_DONE_PARTIAL):
+                self.log.write("ERROR", f"Cierre forzado RECHAZADO (retcode {rc}).",
+                               p.price_current, p.volume, self.b.account_balance(),
+                               ticket=tkt)
+                continue
             total += money
             closed += 1
-            self.b.close_position(p, f"Close: {reason}")
             self.log.write("CIERRE", f"Leg cerrado ({reason}). PnL: {money:.2f}",
                            p.price_current, p.volume, self.b.account_balance(), ticket=tkt)
+        if self._my_positions():
+            return False
         if closed:
             self.log.write("EXITO", f"Cierre TOTAL ({reason}). PnL: {total:.2f}",
                            balance=self.b.account_balance())
+        return True
 
     def _flatten(self):
         """Cierra todo lo propio: el M5 se retira cuando la cuenta aprieta."""

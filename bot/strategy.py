@@ -243,8 +243,43 @@ class SentinelEngine:
     def close_all(self, reason):
         """Cierre inmediato de toda la cesta por comando externo (force_close
         del dashboard). El usuario asume el flotante actual; NO es un stop
-        automatico (esos siguen vetados por diseño)."""
-        self._close_all(reason)
+        automatico (esos siguen vetados por diseño).
+
+        A diferencia de _close_all (cierre de ciclo por TP, best-effort), aqui
+        se verifica el retcode de CADA orden y al final se re-consulta MT5:
+        devuelve True solo si la instancia quedo PLANA. Si el terminal rechaza
+        (AutoTrading off, requote, mercado cerrado) se loguea ERROR con el
+        retcode y el caller NO consume el comando: reintenta en ~3 s.
+        """
+        if self.b.shadow:
+            self.log.write("SHADOW", f"CLOSE ALL ({reason}): sin ordenes reales en modo sombra.")
+            return True
+        total = 0.0
+        for p in self.b.positions():
+            leg_pl = p.profit + p.swap
+            res = self.b.close_position(p, "Close: Forzado (usuario)")
+            rc = getattr(res, "retcode", None)
+            if rc not in (mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_DONE_PARTIAL):
+                self.log.write("ERROR", f"Cierre forzado RECHAZADO (retcode {rc}).",
+                               p.price_current, p.volume, self.b.account_balance(),
+                               ticket=p.ticket)
+                continue
+            total += leg_pl
+            self.log.write("CIERRE", f"Leg cerrado ({reason}). PnL: {leg_pl:.2f}",
+                           p.price_current, p.volume, self.b.account_balance(),
+                           ticket=p.ticket)
+        if self.b.positions():
+            return False  # quedo algo vivo (rechazo o cierre parcial): reintentar
+        # Plano: cerrar el ciclo igual que un cierre normal de cesta.
+        self.log.write("EXITO", f"Cierre CICLO ({reason}). PnL: {total:.2f}",
+                       balance=self.b.account_balance())
+        self.last_recovery_close_time = self.now
+        self.max_cycle_peak = 0.0
+        self.cycle_armed = False
+        self.cycle_realized = 0.0
+        self._healer_needs_rebaseline = True
+        self._cover_protect_logged = False
+        return True
 
     def _close_all(self, reason):
         total_profit = 0.0

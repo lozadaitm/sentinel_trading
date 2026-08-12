@@ -349,17 +349,24 @@ def trading_loop(db, engine, logger, stop_event=None):
                 last_refresh = now
 
                 # Cierre forzado pedido desde el dashboard: el usuario asume el
-                # flotante actual. Se cierra todo lo propio y se consume el
-                # comando (force_close=false + is_active=false en la DB). Si el
-                # reset falla por red, el proximo refresh reintenta: close_all
-                # sobre cero posiciones es inocuo.
+                # flotante actual. El comando SOLO se consume (force_close=false
+                # + is_active=false en la DB) cuando la instancia queda plana:
+                # si el terminal rechaza ordenes (AutoTrading off, requote...)
+                # close_all devuelve False y se reintenta en el proximo refresh
+                # (~3 s) hasta lograrlo, logueando el retcode de cada rechazo.
                 if inst.get("force_close"):
                     logger.write("SYSTEM", "CIERRE FORZADO solicitado por el usuario: "
                                            "cerrando todas las posiciones de esta instancia.")
-                    engine.close_all("Cierre forzado por el usuario")
+                    allowed, motivo = engine.b.trade_allowed()
+                    if not allowed:
+                        logger.write("ERROR", f"CIERRE FORZADO bloqueado por el terminal: {motivo}")
+                    if engine.close_all("Cierre forzado por el usuario"):
+                        db.clear_force_close()
+                    else:
+                        logger.write("ERROR", "Cierre forzado INCOMPLETO: quedan posiciones "
+                                              "abiertas; se reintenta en ~3 s.")
                     engine.is_active = False
                     engine.close_only = True
-                    db.clear_force_close()
 
             if not cfg:
                 # Sin config activa ni cache: nada que gestionar aun.
