@@ -43,6 +43,12 @@
 .PARAMETER NoUI
     Lanza bot.main / bot.main_m5 (consola) en vez de las TUI.
 
+.PARAMETER Lite
+    Modo ahorro para VPS: lanza bot.lite / bot.lite_m5. Sin TUI (nada de
+    rich/plotext refrescando velas), sin log en consola; cada ventana muestra
+    solo "Operando en <usuario>". El log completo sigue en CSV + Supabase y el
+    dashboard no pierde nada. Tiene prioridad sobre -NoUI.
+
 .PARAMETER M15Only
     Levanta solo el Sentinel, ignorando el m5 declarado en BOTS. Util mientras
     el M5 sigue en validacion.
@@ -52,6 +58,7 @@
 
 .EXAMPLE
     scripts\start_all.ps1
+    scripts\start_all.ps1 -Lite -SkipAudits
     scripts\start_all.ps1 -M15Only -SkipAudits
     scripts\start_all.ps1 -DryRun -ForceAudits
 #>
@@ -62,6 +69,7 @@ param(
     [switch]$ForceAudits,
     [switch]$SkipTests,
     [switch]$NoUI,
+    [switch]$Lite,
     [switch]$M15Only,
     [switch]$DryRun
 )
@@ -127,14 +135,18 @@ if ($null -eq $py) { Write-Fail "python no esta en el PATH."; exit 1 }
 Write-Ok "python: $((python --version) 2>$null)"
 
 # find_spec en vez de import: no ejecuta los modulos y no escupe traceback.
-$faltan = python -c "import importlib.util as u; print(','.join(m for m in ('MetaTrader5','pandas','numpy','supabase','rich','plotext') if u.find_spec(m) is None))"
+# En modo -Lite no se exigen rich/plotext: el lite no renderiza nada.
+$deps = "('MetaTrader5','pandas','numpy','supabase','rich','plotext')"
+if ($Lite) { $deps = "('MetaTrader5','pandas','numpy','supabase')" }
+$faltan = python -c "import importlib.util as u; print(','.join(m for m in $deps if u.find_spec(m) is None))"
 if ($LASTEXITCODE -ne 0) { Write-Fail "no se pudo comprobar las dependencias."; exit 1 }
 if ($faltan -ne "") {
     Write-Fail "faltan dependencias: $faltan"
     Write-Host "         python -m pip install -r requirements.txt" -ForegroundColor DarkGray
     exit 1
 }
-Write-Ok "dependencias presentes (incl. rich/plotext para la TUI)"
+if ($Lite) { Write-Ok "dependencias presentes (modo lite: sin rich/plotext)" }
+else       { Write-Ok "dependencias presentes (incl. rich/plotext para la TUI)" }
 
 if (-not (Test-Path $InstancesDir)) { Write-Fail "no existe $InstancesDir"; exit 1 }
 
@@ -225,7 +237,10 @@ foreach ($f in $envFiles) {
     foreach ($b in $bots) {
         if ($b -eq "m5") { $magic = $magicM5;  $mod = "bot.main_m5" }
         else             { $magic = $magicM15; $mod = "bot.main" }
-        if (-not $NoUI) {
+        if ($Lite) {
+            if ($mod -eq "bot.main")    { $mod = "bot.lite" }
+            if ($mod -eq "bot.main_m5") { $mod = "bot.lite_m5" }
+        } elseif (-not $NoUI) {
             if ($mod -eq "bot.main")    { $mod = "bot.tui" }
             if ($mod -eq "bot.main_m5") { $mod = "bot.tui_m5" }
         }

@@ -23,10 +23,16 @@
 
 .PARAMETER KeepTerminals
     No mata los terminal64.exe (util si hay terminales manuales abiertos).
+
+.PARAMETER Lite
+    Relanza en modo ahorro (start_all.ps1 -Lite): sin TUI ni log en consola.
+    Para que el reinicio automatico use lite, añade -Lite a los argumentos de
+    la tarea programada SentinelRestart.
 #>
 param(
     [switch]$DryRun,
-    [switch]$KeepTerminals
+    [switch]$KeepTerminals,
+    [switch]$Lite
 )
 
 $ErrorActionPreference = "Continue"
@@ -46,7 +52,7 @@ Write-Log "=== Reinicio solicitado$modo (provision de instancia nueva) ==="
 
 # --- 1. Bots: python con modulos bot.* + ventanas host de run_instance ---
 $procs = Get-CimInstance Win32_Process | Where-Object {
-    ($_.Name -match '^python' -and $_.CommandLine -match 'bot\.(main|tui)|scripts\.news_exporter') -or
+    ($_.Name -match '^python' -and $_.CommandLine -match 'bot\.(main|tui|lite)|scripts\.news_exporter') -or
     ($_.Name -match '^powershell' -and $_.CommandLine -match 'run_instance\.ps1')
 }
 if (-not $procs) { Write-Log "sin procesos de bot corriendo" }
@@ -75,6 +81,8 @@ if ($DryRun) {
 Start-Sleep -Seconds 5
 
 # --- 3. Relanzar todo ---
-Write-Log "lanzando start_all.ps1 -SkipAudits ..."
-& powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "start_all.ps1") -SkipAudits *>> $log
+$startArgs = @("-SkipAudits")
+if ($Lite) { $startArgs += "-Lite" }
+Write-Log "lanzando start_all.ps1 $($startArgs -join ' ') ..."
+& powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "start_all.ps1") @startArgs *>> $log
 Write-Log "=== start_all terminado (exit $LASTEXITCODE) ==="

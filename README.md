@@ -210,6 +210,7 @@ no cuadra:
 | `-ForceAudits` | repetir `audit_m5_signals` aunque sea reciente |
 | `-DryRun` | preflight + tests + auditorías, sin lanzar los bots |
 | `-NoUI` | modo consola en vez de TUI |
+| `-Lite` | **modo ahorro para VPS**: sin TUI ni log en consola; cada ventana muestra solo "Operando en \<usuario\>". El log completo sigue en CSV + Supabase |
 | `-SkipTests` | saltar la regresión (no recomendado tras un `git pull`) |
 
 Las auditorías son read-only y se archivan con fecha en `logs/audits/`. Si
@@ -226,8 +227,11 @@ powershell -ExecutionPolicy Bypass -File scripts\run_instance.ps1 instances\<USE
 powershell -ExecutionPolicy Bypass -File scripts\run_instance.ps1 instances\<USER_UUID>.env -Module bot.tui
 powershell -ExecutionPolicy Bypass -File scripts\run_instance.ps1 instances\<USER_UUID>.env -BotId m5 -Module bot.tui_m5
 
+# Modo ahorro para VPS (sin render ni log en consola; solo "Operando en <usuario>")
+powershell -ExecutionPolicy Bypass -File scripts\run_instance.ps1 instances\<USER_UUID>.env -Lite
+
 # Levantar todas las instancias de instances\*.env
-powershell -ExecutionPolicy Bypass -File scripts\launch_all.ps1
+powershell -ExecutionPolicy Bypass -File scripts\launch_all.ps1          # añade -Lite para modo ahorro
 ```
 
 Teclas de la TUI: `p` parámetros · `↑`/`↓` `PgUp`/`PgDn` desplazar log · `Fin` log en

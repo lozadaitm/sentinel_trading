@@ -8,9 +8,17 @@
     `bot.main` via run_instance.ps1. Cerrar una ventana detiene esa instancia
     (Ctrl+C -> shutdown limpio).
 
+.PARAMETER Lite
+    Modo ahorro para VPS: lanza bot.lite (sin render ni log en consola; solo
+    "Operando en <usuario>"). Ver scripts\run_instance.ps1 -Lite.
+
 .EXAMPLE
     scripts\launch_all.ps1
+    scripts\launch_all.ps1 -Lite
 #>
+param(
+    [switch]$Lite
+)
 $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
@@ -27,10 +35,12 @@ if (-not $envFiles) {
 
 foreach ($f in $envFiles) {
     Write-Host "Lanzando instancia: $($f.Name)" -ForegroundColor Green
-    Start-Process powershell -ArgumentList @(
+    $procArgs = @(
         "-NoExit", "-ExecutionPolicy", "Bypass",
         "-File", "`"$runner`"", "`"$($f.FullName)`""
     )
+    if ($Lite) { $procArgs += "-Lite" }
+    Start-Process powershell -ArgumentList $procArgs
 }
 
 Write-Host "Lanzadas $($envFiles.Count) instancia(s)." -ForegroundColor Cyan

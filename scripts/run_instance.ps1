@@ -24,12 +24,18 @@
 .PARAMETER UI
     Arranca la TUI en vez del modo consola.
 
+.PARAMETER Lite
+    Modo ahorro para VPS: sin TUI, sin velas, sin log en consola. Solo un
+    banner "Operando en <usuario>". El log completo sigue en CSV + Supabase.
+    Tiene prioridad sobre -UI.
+
 .PARAMETER Module
-    Modulo de Python explicito. Anula la deduccion por BotId/UI.
+    Modulo de Python explicito. Anula la deduccion por BotId/UI/Lite.
 
 .EXAMPLE
     scripts\run_instance.ps1 instances\daniel.env
     scripts\run_instance.ps1 instances\daniel.env -BotId m5 -UI
+    scripts\run_instance.ps1 instances\daniel.env -Lite
     scripts\run_instance.ps1 instances\daniel.env -Module bot.tui
 #>
 param(
@@ -40,6 +46,8 @@ param(
     [string]$BotId = "",
 
     [switch]$UI,
+
+    [switch]$Lite,
 
     [string]$Module = ""
 )
@@ -84,9 +92,9 @@ if ($Module -eq "") {
     if ($env:MODULE) {
         $Module = $env:MODULE
     } elseif ($BotId -eq "m5") {
-        if ($UI) { $Module = "bot.tui_m5" } else { $Module = "bot.main_m5" }
+        if ($Lite) { $Module = "bot.lite_m5" } elseif ($UI) { $Module = "bot.tui_m5" } else { $Module = "bot.main_m5" }
     } else {
-        if ($UI) { $Module = "bot.tui" } else { $Module = "bot.main" }
+        if ($Lite) { $Module = "bot.lite" } elseif ($UI) { $Module = "bot.tui" } else { $Module = "bot.main" }
     }
 }
 
