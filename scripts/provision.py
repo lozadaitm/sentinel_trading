@@ -30,6 +30,7 @@ Config por entorno:
 
 import argparse
 import datetime
+import hashlib
 import os
 import shutil
 import subprocess
@@ -127,12 +128,93 @@ def _enable_algo_trading(clone_dir):
     print("    Algo Trading habilitado (config/common.ini del clon).")
 
 
+# Ficheros del perfil ESPECIFICOS de la cuenta: cada clon conserva los suyos
+# (su almacen de cuentas y su common.ini con el boton de Algo Trading). El
+# resto del perfil base maduro se siembra tal cual.
+_ACCOUNT_LOCAL_FILES = {"accounts.dat", "common.ini"}
+
+
+def _base_runtime_config():
+    """Ruta al `config` del PERFIL DE RUNTIME maduro del terminal base.
+
+    El estado 'listo para la API Python' (IPC) del terminal NO vive en la
+    carpeta de instalacion sino en el perfil de datos que MT5 crea bajo
+    %APPDATA%\\MetaQuotes\\Terminal\\<hash>. Un clon recien copiado con
+    copytree solo trae los binarios + un config minimo: ARRANCA y CONECTA al
+    broker, pero su terminal nunca atiende el pipe IPC de Python y
+    mt5.initialize() expira con (-10005, 'IPC timeout').
+
+    Devuelve <perfil>\\config del terminal base, o None si el base nunca se ha
+    ejecutado interactivamente (no hay perfil maduro que sembrar).
+    """
+    appdata = os.environ.get("APPDATA", "")
+    if not appdata:
+        return None
+    terminals = os.path.join(appdata, "MetaQuotes", "Terminal")
+    if not os.path.isdir(terminals):
+        return None
+    base = os.path.normpath(MT5_BASE_DIR)
+    # 1) Nombre canonico del perfil: MD5(ruta en MAYUSCULAS, UTF-16-LE).
+    want = hashlib.md5(base.upper().encode("utf-16-le")).hexdigest().upper()
+    cand = os.path.join(terminals, want, "config")
+    if os.path.isdir(cand):
+        return cand
+    # 2) Fallback robusto: el perfil cuyo origin.txt apunta al base.
+    for name in os.listdir(terminals):
+        try:
+            with open(os.path.join(terminals, name, "origin.txt"), "rb") as f:
+                raw = f.read()
+        except OSError:
+            continue
+        origin = raw.decode("utf-16", "ignore").strip() or raw.decode("utf-8", "ignore").strip()
+        if os.path.normpath(origin).lower() == base.lower():
+            cfg = os.path.join(terminals, name, "config")
+            if os.path.isdir(cfg):
+                return cfg
+    return None
+
+
+def _seed_ipc_profile(clone_dir):
+    """Siembra el config del perfil base maduro en el clon (idempotente).
+
+    Sin esto el clon conecta al broker pero su terminal no atiende el pipe IPC
+    de Python y mt5.initialize() da (-10005, 'IPC timeout'). Ver
+    _base_runtime_config(). Se excluyen los ficheros de cuenta para que cada
+    clon mantenga su login y su common.ini. Marca: si ya hay settings.ini el
+    perfil ya esta sembrado/maduro y NO se pisa (respeta ajustes del operador).
+    """
+    dst = os.path.join(clone_dir, "config")
+    if os.path.exists(os.path.join(dst, "settings.ini")):
+        return
+    src = _base_runtime_config()
+    if not src:
+        print("    [AVISO] el terminal base no tiene perfil de runtime maduro: "
+              "abrelo una vez e inicia sesion, o el clon dara IPC timeout.")
+        return
+    os.makedirs(dst, exist_ok=True)
+    copied = 0
+    for name in os.listdir(src):
+        if name in _ACCOUNT_LOCAL_FILES:
+            continue
+        s, d = os.path.join(src, name), os.path.join(dst, name)
+        try:
+            if os.path.isdir(s):
+                shutil.copytree(s, d, dirs_exist_ok=True)
+            else:
+                shutil.copy2(s, d)
+            copied += 1
+        except OSError as e:  # noqa: BLE001
+            print(f"    [AVISO] no se pudo sembrar {name}: {e}")
+    print(f"    perfil IPC sembrado desde el base ({copied} entradas).")
+
+
 def _clone_mt5(login):
     """Copia la instalacion base a un clon propio del login. Idempotente."""
     clone_dir = os.path.join(MT5_CLONES_DIR, f"mt5_{login}")
     exe = os.path.join(clone_dir, "terminal64.exe")
     if os.path.exists(exe):
         print(f"    clon MT5 ya existe: {clone_dir}")
+        _seed_ipc_profile(clone_dir)
         _enable_algo_trading(clone_dir)
         return exe
     base_exe = os.path.join(MT5_BASE_DIR, "terminal64.exe")
@@ -143,6 +225,7 @@ def _clone_mt5(login):
     print(f"    clonando {MT5_BASE_DIR} -> {clone_dir} (puede tardar)...")
     os.makedirs(MT5_CLONES_DIR, exist_ok=True)
     shutil.copytree(MT5_BASE_DIR, clone_dir)
+    _seed_ipc_profile(clone_dir)
     _enable_algo_trading(clone_dir)
     return exe
 
