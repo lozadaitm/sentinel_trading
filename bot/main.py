@@ -101,8 +101,15 @@ def setup(logger=None, engine_cls=None):
     if engine.initial_balance is None:
         engine.initial_balance = broker.account_balance()
     if engine.last_flow_ticket is None:
-        engine.last_flow_ticket = max(
-            (d.ticket for d in broker.capital_flows(0)), default=0)
+        # OJO: un terminal recien provisionado puede devolver historial VACIO
+        # (aun sincronizando con el servidor). Anclar en 0 en ese estado hace
+        # que el deposito inicial aparezca horas despues como "deposito nuevo"
+        # y DUPLIQUE la base. Sin deals visibles, el ancla queda pendiente
+        # (None -> NULL en bot_state) y _reconcile_capital_flows la fija al
+        # primer historial no vacio, sin ajustar la base.
+        flows = broker.capital_flows(0)
+        if flows:
+            engine.last_flow_ticket = max(d.ticket for d in flows)
 
     # Backfill de velas para la grafica del dashboard + poda de retencion.
     if config.BOT_ID == "m15":
@@ -249,9 +256,22 @@ def _reconcile_capital_flows(engine, logger):
     retiro la baja (retirar no hunde el % del objetivo). El ancla por ticket
     (bot_state.last_flow_ticket) evita el doble conteo entre heartbeats y
     restarts; la persistencia va en el mismo report_state del heartbeat.
+
+    Ancla pendiente (None): el historial estaba vacio al capturar la base
+    (terminal recien provisionado, aun sincronizando). El balance capturado ya
+    reflejaba esos deals, asi que el primer historial no vacio solo ANCLA, sin
+    ajustar la base. Un flujo real dentro de esa ventana sin ancla se absorbe
+    sin ajuste (ventana corta y rara; asumido).
     """
-    flows = engine.b.capital_flows(engine.last_flow_ticket)
+    flows = engine.b.capital_flows(engine.last_flow_ticket or 0)
     if not flows:
+        return
+    if engine.last_flow_ticket is None:
+        engine.last_flow_ticket = max(d.ticket for d in flows)
+        logger.write("SYSTEM",
+                     f"Ancla de flujos fijada en ticket {engine.last_flow_ticket} "
+                     f"({len(flows)} mov. historicos ya reflejados en la base).",
+                     balance=engine.b.account_balance())
         return
     net = sum(d.profit for d in flows)
     engine.initial_balance += net

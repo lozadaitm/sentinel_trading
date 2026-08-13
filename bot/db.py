@@ -294,7 +294,10 @@ class Database:
             "floating_pnl": float(floating_pnl),
             "open_positions": int(open_positions),
             "initial_balance": float(initial_balance),
-            "last_flow_ticket": int(last_flow_ticket or 0),
+            # None = ancla pendiente (historial MT5 aun sin sincronizar): debe
+            # persistirse como NULL, no como 0, para que un restart no la de
+            # por fijada y re-cuente el deposito inicial como flujo nuevo.
+            "last_flow_ticket": int(last_flow_ticket) if last_flow_ticket is not None else None,
             "baseline_applied_at": baseline_applied_at,
             "updated_at": _utcnow_iso(),
         }
