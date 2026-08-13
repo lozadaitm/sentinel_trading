@@ -374,6 +374,19 @@ foreach ($i in $aLanzar) {
     Start-Sleep -Milliseconds 1500
 }
 
+# NewsGuard: UN solo exportador de calendario para TODAS las instancias. Escribe
+# el JSON compartido (carpeta Common de MetaQuotes) que lee bot/news.py; deriva
+# el offset del servidor de un terminal ya vivo. Ver scripts/news_exporter.py.
+# Se mata cualquier exportador previo para no duplicarlo en reinicios.
+Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+    Where-Object { $_.CommandLine -match 'news_exporter' } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+Write-Host "  Lanzando News Exporter (calendario economico, comun a todas)" -ForegroundColor Green
+Start-Process powershell -ArgumentList @(
+    "-NoExit", "-ExecutionPolicy", "Bypass", "-Command",
+    "Set-Location '$projectRoot'; python -m scripts.news_exporter"
+)
+
 Write-Host ""
 Write-Host ("=" * 72) -ForegroundColor DarkCyan
 Write-Ok "$($aLanzar.Count) bot(s) lanzado(s). Cada uno en su ventana."

@@ -46,7 +46,7 @@ Write-Log "=== Reinicio solicitado$modo (provision de instancia nueva) ==="
 
 # --- 1. Bots: python con modulos bot.* + ventanas host de run_instance ---
 $procs = Get-CimInstance Win32_Process | Where-Object {
-    ($_.Name -match '^python' -and $_.CommandLine -match 'bot\.(main|tui)') -or
+    ($_.Name -match '^python' -and $_.CommandLine -match 'bot\.(main|tui)|scripts\.news_exporter') -or
     ($_.Name -match '^powershell' -and $_.CommandLine -match 'run_instance\.ps1')
 }
 if (-not $procs) { Write-Log "sin procesos de bot corriendo" }
